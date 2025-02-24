@@ -1,5 +1,5 @@
 import unittest
-
+import concurrent.futures
 import utils as tu
 
 
@@ -142,6 +142,64 @@ class TestMicroservices(unittest.TestCase):
         credit: int = tu.find_user(user_id)['credit']
         self.assertEqual(credit, 5)
 
+    def test_concurrent_ordering(self):
+        """
+        测试两个用户同时下单，确保不会发生超卖
+        """
+        # 创建一个库存数量 = 1 的商品
+        item: dict = tu.create_item(5)  # 价格 5
+        self.assertIn('item_id', item)
+
+        item_id: str = item['item_id']
+
+        add_stock_response = tu.add_stock(item_id, 1)  # 只增加 1 库存
+        self.assertTrue(tu.status_code_is_success(add_stock_response))
+
+        # 创建两个用户
+        user_a: dict = tu.create_user()
+        user_b: dict = tu.create_user()
+        self.assertIn('user_id', user_a)
+        self.assertIn('user_id', user_b)
+
+        user_id_a: str = user_a['user_id']
+        user_id_b: str = user_b['user_id']
+
+        tu.add_credit_to_user(user_id_a, 10)
+        tu.add_credit_to_user(user_id_b, 10)
+
+        print("Stock before orders:", tu.find_item(item_id)['stock'])
+
+        # 两个用户同时创建订单
+        def place_order(user_id):
+            order: dict = tu.create_order(user_id)
+            self.assertIn('order_id', order)
+            order_id: str = order['order_id']
+
+            add_item_response = tu.add_item_to_order(order_id, item_id, 1)  # 试图购买 1 件商品
+            self.assertTrue(tu.status_code_is_success(add_item_response))
+
+            checkout_result = tu.checkout_order(order_id)
+
+            return checkout_result  # 返回是否成功
+
+        # 使用多线程模拟并发下单
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future_a = executor.submit(place_order, user_id_a)
+            future_b = executor.submit(place_order, user_id_b)
+
+            result_a = future_a.result()
+            result_b = future_b.result()
+
+        print("Stock after orders:", tu.find_item(item_id)['stock'])
+
+        # 只有一个用户能成功下单
+        self.assertTrue(result_a, "必须有一个用户购买成功")
+        self.assertTrue(result_a or result_b, "必须有一个用户购买成功")
+        self.assertTrue(result_a != result_b, "必须有一个用户购买失败")  # 不能两个都成功
+
+        # 最终库存应该 = 0
+        stock_after_orders = tu.find_item(item_id)['stock']
+        self.assertEqual(stock_after_orders, 0)
 
 if __name__ == '__main__':
     unittest.main()
