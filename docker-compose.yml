@@ -30,11 +30,14 @@ services:
     container_name: order-db-master
     volumes:
       - ./data/order-db/master:/data
+    ports:
+      - "16379:6379"
     command:
       [
         "redis-server",
         "--appendonly", "yes",
         "--requirepass", "redis",
+        "--masterauth", "redis",
         "--maxmemory", "512mb",
         "--repl-diskless-load", "on-empty-db",
         "--replica-announce-port", "6379",
@@ -60,7 +63,7 @@ services:
         "--maxmemory", "512mb",
         "--replicaof", "order-db-master", "6379",
         "--repl-diskless-load", "on-empty-db",
-        "--replica-announce-port", "6380",
+        "--replica-announce-port", "6379",
         "--protected-mode", "no"
       ]
   
