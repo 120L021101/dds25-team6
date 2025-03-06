@@ -18,7 +18,7 @@ services:
     image: order:latest
     environment:
       - GATEWAY_URL=http://gateway:80
-    command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
+    command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
     env_file:
       - env/order_redis.env
     depends_on:
@@ -93,7 +93,7 @@ services:
   stock-service:
     build: ./stock
     image: stock:latest
-    command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
+    command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
     env_file:
       - env/stock_redis.env
     depends_on:
@@ -161,7 +161,7 @@ services:
   payment-service:
     build: ./payment
     image: user:latest
-    command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
+    command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
     env_file:
       - env/payment_redis.env
     depends_on:
