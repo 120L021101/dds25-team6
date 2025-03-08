@@ -109,12 +109,6 @@ services:
       my_network:
         ipv4_address: 192.168.1.50
 
-            
-      
-  # order-db:
-  #   image: redis:7.2-bookworm
-  #   command: redis-server --requirepass redis --maxmemory 512mb
-
   stock-service:
     build: ./stock
     image: stock:latest
@@ -123,6 +117,9 @@ services:
       - env/stock_redis.env
     depends_on:
       - stock-db-sentinel
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.60
 
   stock-db-master:
     image: redis:7.2-bookworm
@@ -140,6 +137,9 @@ services:
         "--replica-announce-port", "6380",
         "--protected-mode", "no"
       ]
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.70
 
   stock-db-slave:
     image: redis:7.2-bookworm
@@ -158,12 +158,15 @@ services:
         "--masterauth", "redis",
         "--requirepass", "redis",
         "--maxmemory", "512mb",
-        "--replicaof", "stock-db-master", "6379",
+        "--replicaof", "192.168.1.70", "6379",
         "--repl-diskless-load", "on-empty-db",
         "--replica-announce-port", "6381",
         "--protected-mode", "no"
       ]
-  
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.80
+
   stock-db-sentinel:
     image: redis:7.2-bookworm
     container_name: stock-db-sentinel
@@ -175,22 +178,28 @@ services:
       - "26380:26379"
     command: >
       sh -c 'echo "bind 0.0.0.0" > /etc/sentinel.conf &&
-            echo "sentinel monitor stock-master stock-db-master 6379 1" >> /etc/sentinel.conf &&
+            echo "sentinel monitor stock-master 192.168.1.70 6379 1" >> /etc/sentinel.conf &&
             echo "sentinel auth-pass stock-master redis" >> /etc/sentinel.conf &&
-            echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
+            echo "sentinel resolve-hostnames no" >> /etc/sentinel.conf &&
             echo "sentinel down-after-milliseconds stock-master 5000" >> /etc/sentinel.conf &&
             echo "sentinel failover-timeout stock-master 5000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs stock-master 1" >> /etc/sentinel.conf &&
             redis-sentinel /etc/sentinel.conf'
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.90
 
   payment-service:
     build: ./payment
-    image: user:latest
+    image: payment:latest
     command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
     env_file:
       - env/payment_redis.env
     depends_on:
       - payment-db-sentinel
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.100
 
   payment-db-master:
     image: redis:7.2-bookworm
@@ -208,6 +217,9 @@ services:
         "--replica-announce-port", "6381",
         "--protected-mode", "no"
       ]
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.110
 
   payment-db-slave:
     image: redis:7.2-bookworm
@@ -226,12 +238,15 @@ services:
         "--masterauth", "redis",
         "--requirepass", "redis",
         "--maxmemory", "512mb",
-        "--replicaof", "payment-db-master", "6379",
+        "--replicaof", "192.168.1.110", "6379",
         "--repl-diskless-load", "on-empty-db",
         "--replica-announce-port", "6382",
         "--protected-mode", "no"
       ]
-  
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.120
+
   payment-db-sentinel:
     image: redis:7.2-bookworm
     container_name: payment-db-sentinel
@@ -243,10 +258,13 @@ services:
       - "26381:26379"
     command: >
       sh -c 'echo "bind 0.0.0.0" > /etc/sentinel.conf &&
-            echo "sentinel monitor payment-master payment-db-master 6379 1" >> /etc/sentinel.conf &&
+            echo "sentinel monitor payment-master 192.168.1.110 6379 1" >> /etc/sentinel.conf &&
             echo "sentinel auth-pass payment-master redis" >> /etc/sentinel.conf &&
-            echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
+            echo "sentinel resolve-hostnames no" >> /etc/sentinel.conf &&
             echo "sentinel down-after-milliseconds payment-master 5000" >> /etc/sentinel.conf &&
             echo "sentinel failover-timeout payment-master 5000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs payment-master 1" >> /etc/sentinel.conf &&
             redis-sentinel /etc/sentinel.conf'
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.130
