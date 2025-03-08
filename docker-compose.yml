@@ -1,5 +1,12 @@
 version: "3"
 
+networks:
+  my_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
+
 services:
 
   gateway:
@@ -12,6 +19,9 @@ services:
       - order-service
       - stock-service
       - payment-service
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.10
 
   order-service:
     build: ./order
@@ -23,6 +33,9 @@ services:
       - env/order_redis.env
     depends_on:
       - order-db-sentinel
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.20
 
   order-db-master:
     image: redis:7.2-bookworm
@@ -43,6 +56,9 @@ services:
         "--replica-announce-port", "6379",
         "--protected-mode", "no"
       ]
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.30
 
   order-db-slave:
     image: redis:7.2-bookworm
@@ -61,11 +77,14 @@ services:
         "--masterauth", "redis",
         "--requirepass", "redis",
         "--maxmemory", "512mb",
-        "--replicaof", "order-db-master", "6379",
+        "--replicaof", "192.168.1.30", "6379",
         "--repl-diskless-load", "on-empty-db",
         "--replica-announce-port", "6379",
         "--protected-mode", "no"
       ]
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.40
   
   order-db-sentinel:
     image: redis:7.2-bookworm
@@ -78,13 +97,19 @@ services:
       - "26379:26379"
     command: >
       sh -c 'echo "bind 0.0.0.0" > /etc/sentinel.conf &&
-            echo "sentinel monitor order-master order-db-master 6379 1" >> /etc/sentinel.conf &&
+            echo "sentinel monitor order-master 192.168.1.30 6379 1" >> /etc/sentinel.conf &&
             echo "sentinel auth-pass order-master redis" >> /etc/sentinel.conf &&
-            echo "sentinel resolve-hostnames yes" >> /etc/sentinel.conf &&
             echo "sentinel down-after-milliseconds order-master 5000" >> /etc/sentinel.conf &&
             echo "sentinel failover-timeout order-master 5000" >> /etc/sentinel.conf &&
             echo "sentinel parallel-syncs order-master 1" >> /etc/sentinel.conf &&
+            echo "sentinel resolve-hostnames no" >> /etc/sentinel.conf &&
+            echo "sentinel announce-hostnames no" >> /etc/sentinel.conf &&
             redis-sentinel /etc/sentinel.conf'
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.50
+
+            
       
   # order-db:
   #   image: redis:7.2-bookworm
