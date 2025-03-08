@@ -113,6 +113,8 @@ services:
     build: ./stock
     image: stock:latest
     command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
+    ports:
+      - "5100:5000"
     env_file:
       - env/stock_redis.env
     depends_on:
