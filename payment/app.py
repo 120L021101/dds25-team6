@@ -119,6 +119,64 @@ def remove_credit(user_id: str, amount: int):
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
 
+
+
+## Below is 2PC ##
+
+# Prepare 
+with open(file='2pc/prepare.lua', mode='r') as f:
+    checkout_prepare_script = db.register_script(f.read())
+
+@app.post('/checkout_prepare/<user_id>/<transaction_id>/<amount>')
+def checkout_prepare(user_id, transaction_id, amount: str):
+    app.logger.info(f"PREPARE: {transaction_id}, {user_id}")
+    user_entry = get_user_from_db(user_id=user_id)
+    if user_entry.credit < int(amount):
+        """ cannot prepare """
+        return jsonify({"message": "not sufficient remaining money"})
+
+    ret = checkout_prepare_script(keys=[user_id,], args=[transaction_id,])
+    app.logger.info(ret)
+    return jsonify({"status" : ret.decode("utf-8")})
+
+# Commit
+with open(file='2pc/commit.lua', mode='r') as f:
+    checkout_commit_script = db.register_script(f.read())
+
+@app.post('/checkout_commit/<user_id>/<transaction_id>/<amount>')
+def checkout_commit(user_id, transaction_id, amount: str):
+    app.logger.info(f"COMMIT: {transaction_id}, {user_id}")
+
+    user_entry = get_user_from_db(user_id=user_id)
+    
+    ret = checkout_commit_script(keys=[user_id,], args=[transaction_id,]).decode("utf-8")
+
+
+    key = str(uuid.uuid4())
+    value = msgpack.encode(UserValue(credit=0))
+    try:
+        db.set(key, value)
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    return jsonify({'user_id': key})
+
+    return jsonify({"status" : result})
+
+# Rollback, hopefully not needed
+with open(file='2pc/rollback.lua', mode='r') as f:
+    checkout_rollback_script = db.register_script(f.read())
+
+@app.route('/checkout_rollback', methods=['POST'])
+def checkout_rollback():
+    from flask import request
+    data = request.json
+    trxn_id, user_id = data["transaction_id"], data["user_id"]
+
+    result = user_id(keys=[user_id], args=[checkout_rollback_script, trxn_id])
+    return jsonify({"status" : result})
+
+## 2PC Ends ##
+
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)
 else:

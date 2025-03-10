@@ -116,9 +116,9 @@ def find_order(order_id: str):
     )
 
 
-def send_post_request(url: str):
+def send_post_request(url: str, data: dict=None):
     try:
-        response = requests.post(url)
+        response = requests.post(url, data=data)
     except requests.exceptions.RequestException:
         abort(400, REQ_ERROR_STR)
     else:
@@ -158,6 +158,22 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 
 @app.post('/checkout/<order_id>')
+def checkout_2pc(order_id: str):
+    app.logger.info(f"Checking out {order_id}")
+    order_entry: OrderValue = get_order_from_db(order_id)
+
+    import uuid
+    txn_id = str(uuid.uuid4())
+    app.logger.info(f"Generated Transaction ID: {txn_id}")
+
+    # prepare phase
+    prepare_resp = (
+        send_post_request(f"{GATEWAY_URL}/payment/checkout_prepare/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}"),
+    )
+    app.logger.info(f"{prepare_resp}")
+
+    return Response("Checkout successful", status=200)
+
 def checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
