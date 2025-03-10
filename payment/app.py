@@ -150,17 +150,10 @@ def checkout_commit(user_id, transaction_id, amount: str):
     user_entry = get_user_from_db(user_id=user_id)
     
     ret = checkout_commit_script(keys=[user_id,], args=[transaction_id,]).decode("utf-8")
+    if ret == "COMMITTED":
+        pass
 
-
-    key = str(uuid.uuid4())
-    value = msgpack.encode(UserValue(credit=0))
-    try:
-        db.set(key, value)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return jsonify({'user_id': key})
-
-    return jsonify({"status" : result})
+    return jsonify({"status" : ret})
 
 # Rollback, hopefully not needed
 with open(file='2pc/rollback.lua', mode='r') as f:
