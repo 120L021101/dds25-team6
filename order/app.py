@@ -11,6 +11,7 @@ import requests
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 from redis.sentinel import Sentinel 
+import time
 
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
@@ -156,21 +157,71 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
     for item_id, quantity in removed_items:
         send_post_request(f"{GATEWAY_URL}/stock/add/{item_id}/{quantity}")
 
+# This script is to log all the uncommited commit transactions, if the main server is down, backup can still continue to commit those
+with open(file='2pc/log_commit.lua', mode='r') as f:
+    log_commit = db.register_script(f.read())
+
+# Opposite to log_commit
+with open(file='2pc/unlog_commit.lua', mode='r') as f:
+    unlog_commit = db.register_script(f.read())
 
 @app.post('/checkout/<order_id>')
 def checkout_2pc(order_id: str):
     app.logger.info(f"Checking out {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
 
+    if order_entry.paid:
+        return Response("Has been Checkout, can't checkout again", status=200)
+
     import uuid
     txn_id = str(uuid.uuid4())
     app.logger.info(f"Generated Transaction ID: {txn_id}")
 
     # prepare phase
-    prepare_resp = (
-        send_post_request(f"{GATEWAY_URL}/payment/checkout_prepare/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}"),
-    )
+    prepare_resp = [
+        # payment
+        send_post_request(f"{GATEWAY_URL}/payment/checkout_prepare/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}")
+    ] + [
+        # stock
+        send_post_request(f"{GATEWAY_URL}/stock/checkout_prepare/{item_id}/{txn_id}/{amount}") 
+            for (item_id, amount) in order_entry.items
+    ]
+
+    # any failed, rollback
+    if any(resp.status_code != 200 for resp in prepare_resp):
+        # even if this failed again, cuz the lock has lifetime, it should release the lock itself 
+        # but, for sure, can be improved by a similar log file which records transactions to be rollbacked
+        send_post_request(f"{GATEWAY_URL}/payment/checkout_rollback/{order_entry.user_id}/{txn_id}")
+        return Response("Checkout Failed, Please Retry Later", status=200)
+    
     app.logger.info(f"{prepare_resp}")
+
+    # commit phase
+    # first, log this to-be-committed transaction
+    log_commit(keys=[], args=[txn_id])
+
+    # try to commit it
+    COMMIT_RETRIES = 10
+    commit_resp_payment = None
+    for _ in range(COMMIT_RETRIES):
+        commit_resp_payment = send_post_request(
+            f"{GATEWAY_URL}/payment/checkout_commit/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}"
+        )
+        app.logger.info(f"{commit_resp_payment}")
+        if commit_resp_payment: # and order resp
+            break
+    
+    # update status of this order
+    order_entry.paid = True
+    for _ in range(COMMIT_RETRIES):
+        try: db.set(order_id, msgpack.encode(order_entry))
+        except: continue
+        
+    # if successful, remove this transaction from the log set
+    unlog_commit(keys=[], args=[txn_id])
+
+    # TODO: should commit all the transactions in the uncommit set
+    # this is for failure recovery.
 
     return Response("Checkout successful", status=200)
 

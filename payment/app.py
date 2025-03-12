@@ -8,6 +8,7 @@ import redis
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 from redis.sentinel import Sentinel
+import time
 
 DB_ERROR_STR = "DB error"
 
@@ -133,40 +134,61 @@ def checkout_prepare(user_id, transaction_id, amount: str):
     user_entry = get_user_from_db(user_id=user_id)
     if user_entry.credit < int(amount):
         """ cannot prepare """
-        return jsonify({"message": "not sufficient remaining money"})
+        return Response(f"Insufficient Money", status=500)
 
     ret = checkout_prepare_script(keys=[user_id,], args=[transaction_id,])
     app.logger.info(ret)
-    return jsonify({"status" : ret.decode("utf-8")})
+    return Response(f"{ret.decode("utf-8")}", status=200)
 
 # Commit
-with open(file='2pc/commit.lua', mode='r') as f:
-    checkout_commit_script = db.register_script(f.read())
+REDIS_RETRIES = 10
 
 @app.post('/checkout_commit/<user_id>/<transaction_id>/<amount>')
 def checkout_commit(user_id, transaction_id, amount: str):
+    # class impedance, have to do commit here
     app.logger.info(f"COMMIT: {transaction_id}, {user_id}")
 
-    user_entry = get_user_from_db(user_id=user_id)
+    # construct lock_key
+    lock_key = user_id + ":lock"
+    trx_id_lock = None
+    for _ in range(REDIS_RETRIES):
+        try: trx_id_lock = db.get(lock_key).decode('utf-8')
+        except: time.sleep(1.0)
     
-    ret = checkout_commit_script(keys=[user_id,], args=[transaction_id,]).decode("utf-8")
-    if ret == "COMMITTED":
-        pass
+    # current lock is not owned by this transaction
+    # actually, should never happen, So only for debugging, currently use assert
+    assert trx_id_lock == transaction_id, f"Lock Owner Error! Owner is {trx_id_lock}, This is {transaction_id}"
 
-    return jsonify({"status" : ret})
+    # get user object
+    user_entry = None
+    for _ in range(REDIS_RETRIES):
+        user_entry = get_user_from_db(user_id=user_id)
+        if user_entry is not None:
+            break
 
-# Rollback, hopefully not needed
+    # subtract amount
+    user_entry.credit -= int(amount)
+
+    # store the changes
+    try:
+        db.set(user_id, msgpack.encode(user_entry))
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    
+    # Release the lock
+    db.delete(lock_key)
+
+    return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+
+
 with open(file='2pc/rollback.lua', mode='r') as f:
     checkout_rollback_script = db.register_script(f.read())
 
-@app.route('/checkout_rollback', methods=['POST'])
-def checkout_rollback():
-    from flask import request
-    data = request.json
-    trxn_id, user_id = data["transaction_id"], data["user_id"]
+@app.post('/checkout_rollback/<user_id>/<transaction_id>')
+def checkout_rollback(user_id, transaction_id):
 
-    result = user_id(keys=[user_id], args=[checkout_rollback_script, trxn_id])
-    return jsonify({"status" : result})
+    ret = checkout_rollback_script(keys=[user_id], args=[transaction_id])
+    return jsonify({"status" : ret.decode("utf-8")})
 
 ## 2PC Ends ##
 

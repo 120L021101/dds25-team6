@@ -120,6 +120,32 @@ def remove_stock(item_id: str, amount: int):
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
 
 
+## Below is 2PC ##
+
+# Prepare 
+with open(file='2pc/prepare.lua', mode='r') as f:
+    checkout_prepare_script = db.register_script(f.read())
+
+@app.post('/checkout_prepare/<item_id>/<transaction_id>/<amount>')
+def checkout_prepare(item_id, transaction_id, amount: str):
+    return Response(f"UNIMPLEMENTED", status=400)
+
+# Commit
+REDIS_RETRIES = 10
+
+@app.post('/checkout_commit/<item_id>/<transaction_id>/<amount>')
+def checkout_commit(item_id, transaction_id, amount: str):
+    return Response(f"UNIMPLEMENTED", status=400)
+
+with open(file='2pc/rollback.lua', mode='r') as f:
+    checkout_rollback_script = db.register_script(f.read())
+
+@app.post('/checkout_rollback/<item_id>/<transaction_id>')
+def checkout_rollback(item_id, transaction_id):
+    return Response(f"UNIMPLEMENTED", status=400)
+
+## 2PC Ends ##
+
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)
 else:
