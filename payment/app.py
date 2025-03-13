@@ -143,10 +143,26 @@ def checkout_prepare(user_id, transaction_id, amount: str):
 # Commit
 REDIS_RETRIES = 10
 
+'''
+this function should hold idempotence,
+even the response message should be the same
+'''
 @app.post('/checkout_commit/<user_id>/<transaction_id>/<amount>')
 def checkout_commit(user_id, transaction_id, amount: str):
     # class impedance, have to do commit here
     app.logger.info(f"COMMIT: {transaction_id}, {user_id}")
+
+    # get user object
+    user_entry = None
+    for _ in range(REDIS_RETRIES):
+        user_entry = get_user_from_db(user_id=user_id)
+        if user_entry is None:
+            time.sleep(1.0)
+
+    # lookup the current transaction status
+    status: str = db.get(transaction_id).decode('utf-8')
+    if status.startswith("COMMITTED"):
+        return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
     # construct lock_key
     lock_key = user_id + ":lock"
@@ -159,13 +175,6 @@ def checkout_commit(user_id, transaction_id, amount: str):
     # actually, should never happen, So only for debugging, currently use assert
     assert trx_id_lock == transaction_id, f"Lock Owner Error! Owner is {trx_id_lock}, This is {transaction_id}"
 
-    # get user object
-    user_entry = None
-    for _ in range(REDIS_RETRIES):
-        user_entry = get_user_from_db(user_id=user_id)
-        if user_entry is not None:
-            break
-
     # subtract amount
     user_entry.credit -= int(amount)
 
@@ -175,8 +184,9 @@ def checkout_commit(user_id, transaction_id, amount: str):
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     
-    # Release the lock
+    # Release the lock, update the transaction status to commited
     db.delete(lock_key)
+    db.set(transaction_id, f"COMMITTED")
 
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 

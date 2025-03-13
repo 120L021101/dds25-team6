@@ -9,8 +9,8 @@ local txn_key = user_key .. ":txn"
 local txn_id = ARGV[1]
 
 if redis.call("SETNX", lock_key, txn_id) == 1 then
-    redis.call("EXPIRE", lock_key, 30) -- can't be too long, nor too short
-    redis.call("SET", txn_key, "PREPARED:" .. txn_id)
+    -- redis.call("EXPIRE", lock_key, 120) -- can't be too long, nor too short
+    redis.call("SET", txn_id, "PREPARED")
     return "PREPARED" 
 else
     return "Failed, Already Locked"
