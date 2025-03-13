@@ -12,6 +12,7 @@ from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 from redis.sentinel import Sentinel 
 import time
+import json
 
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
@@ -157,7 +158,7 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
     for item_id, quantity in removed_items:
         send_post_request(f"{GATEWAY_URL}/stock/add/{item_id}/{quantity}")
 
-# This script is to log all the uncommited commit transactions, if the main server is down, backup can still continue to commit those
+# This script is to log all the uncommited commit transactions(and delete from rollback), if the main server is down, backup can still continue to commit those
 with open(file='2pc/commit_log.lua', mode='r') as f:
     log_commit = db.register_script(f.read())
 
@@ -185,54 +186,101 @@ def checkout_2pc(order_id: str):
     txn_id = str(uuid.uuid4())
     app.logger.info(f"Generated Transaction ID: {txn_id}")
 
+    # log this transaction to rollback set before try to prepare
+    log_item = json.dumps({
+        "transaction_id" : txn_id,
+        "order_id": order_id,
+        "user_id" : order_entry.user_id,
+        "items" : order_entry.items,
+        "total_cost": order_entry.total_cost,
+    })
+    log_rollback(keys=[], args=[log_item])
+
     # prepare phase
     prepare_resp = [
-        # payment
+        # payment prepare
         send_post_request(f"{GATEWAY_URL}/payment/checkout_prepare/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}")
     ] + [
-        # stock
-        send_post_request(f"{GATEWAY_URL}/stock/checkout_prepare/{item_id}/{txn_id}/{amount}") 
-            for (item_id, amount) in order_entry.items
+        # stock prepare
+        # send_post_request(f"{GATEWAY_URL}/stock/checkout_prepare/{item_id}/{txn_id}/{amount}") 
+        #     for (item_id, amount) in order_entry.items
     ]
 
-    # any failed, rollback
-    if any(resp.status_code != 200 for resp in prepare_resp):
-        app.logger.info(f"Rollback {txn_id}")
-        log_rollback(keys=[], args=[txn_id])
-        send_post_request(f"{GATEWAY_URL}/payment/checkout_rollback/{order_entry.user_id}/{txn_id}")
-        unlog_rollback(keys=[], args=[txn_id])
-        return Response("Checkout Failed, Please Retry Later", status=200)
-    
-    app.logger.info(f"{prepare_resp}")
+    # nothing failed, add to commit set
+    resp = Response("Checkout Failed, Please Retry Later", status=200)
+    if all(resp.status_code == 200 for resp in prepare_resp):
+        log_commit(keys=[], args=[log_item])
+        order_entry.paid = True
+        db.set(order_id, msgpack.encode(order_entry))
+        resp = Response("Checkout admitted. Result may be updated later in mins", status=200)
 
-    # commit phase
-    # first, log this to-be-committed transaction
-    log_commit(keys=[], args=[txn_id])
+    # finally first, try to rollback all the rollback set
+    rollback_set = db.smembers("unrollback_txn_set")
+    app.logger.info(f"Rollback {rollback_set}")
 
-    # try to commit it
-    COMMIT_RETRIES = 10
-    commit_resp_payment = None
-    for _ in range(COMMIT_RETRIES):
-        commit_resp_payment = send_post_request(
-            f"{GATEWAY_URL}/payment/checkout_commit/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}"
-        )
-        app.logger.info(f"{commit_resp_payment}")
-        if commit_resp_payment: # and order resp
-            break
+    for log_item_rllbck in [ json.loads(item.decode("utf-8")) for item in rollback_set ]:
+        rollback_resp = [
+            # payment rollback
+            send_post_request(f"{GATEWAY_URL}/payment/checkout_rollback/{log_item_rllbck['user_id']}/{log_item_rllbck['transaction_id']}")
+        ] + [
+            # order rollback
+        ]
+        if all(resp.status_code == 200 for resp in rollback_resp):
+            unlog_rollback(keys=[], args=[json.dumps(log_item_rllbck)])
+
+    # finally then, try to commit all the commit set
+    commit_set = db.smembers("uncommit_txn_set")
+    app.logger.info(f"Rollback {commit_set}")
+
+    for log_item_cmmt in [ json.loads(item.decode("utf-8")) for item in commit_set ]:
+        commit_resp = [
+            # payment commit
+            send_post_request(f"{GATEWAY_URL}/payment/checkout_commit/" + 
+                f"{log_item_cmmt['user_id']}/{log_item_cmmt['transaction_id']}/{log_item_cmmt['total_cost']}")
+        ] + [
+            # order commit
+        ]
+        app.logger.info(f"commit response: {commit_resp[0].text}")
+        if all(resp.status_code == 200 for resp in commit_resp):
+            unlog_commit(keys=[], args=[json.dumps(log_item_cmmt)])
+
+    return resp
+
+
+    # if True:
+    #     send_post_request(f"{GATEWAY_URL}/payment/checkout_rollback/{order_entry.user_id}/{txn_id}")
+    #     return Response("Checkout Failed, Please Retry Later", status=200)
     
-    # update status of this order
-    order_entry.paid = True
-    for _ in range(COMMIT_RETRIES):
-        try: db.set(order_id, msgpack.encode(order_entry))
-        except: continue
+    # app.logger.info(f"{prepare_resp}")
+
+    # # commit phase
+    # # first, log this to-be-committed transaction
+    # log_commit(keys=[], args=[txn_id])
+
+    # # try to commit it
+    # COMMIT_RETRIES = 10
+    # commit_resp_payment = None
+    # for _ in range(COMMIT_RETRIES):
+    #     commit_resp_payment = send_post_request(
+    #         f"{GATEWAY_URL}/payment/checkout_commit/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}"
+    #     )
+    #     app.logger.info(f"{commit_resp_payment}")
+    #     if commit_resp_payment: # and order resp
+    #         break
+    
+    # # update status of this order
+    # order_entry.paid = True
+    # for _ in range(COMMIT_RETRIES):
+    #     try: db.set(order_id, msgpack.encode(order_entry))
+    #     except: continue
         
-    # if successful, remove this transaction from the log set
-    unlog_commit(keys=[], args=[txn_id])
+    # # if successful, remove this transaction from the log set
+    # unlog_commit(keys=[], args=[txn_id])
 
-    # TODO: should commit all the transactions in the uncommit set
-    # this is for failure recovery.
+    # # TODO: should commit all the transactions in the uncommit set
+    # # this is for failure recovery.
 
-    return Response("Checkout successful", status=200)
+    # return Response("Checkout successful", status=200)
 
 def checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")

@@ -159,12 +159,16 @@ def checkout_commit(user_id, transaction_id, amount: str):
         if user_entry is None:
             time.sleep(1.0)
 
+    app.logger.info(f"COMMIT: {transaction_id}, {user_id}")
     # lookup the current transaction status
-    status: str = db.get(transaction_id).decode('utf-8')
-    if status.startswith("COMMITTED"):
-        return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
-    elif not status.startswith("PREPARED"):
-        return Response(f"{transaction_id} has been either rollbacked or never existing", status=500)
+    status: bytes | None = db.get(transaction_id)
+    if status is not None:
+        status = status.decode("utf-8")
+        app.logger.info(f"current state: {status}")
+        if status.startswith("COMMITTED"):
+            return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+        elif not status.startswith("PREPARED"):
+            return Response(f"{transaction_id} has been either rollbacked or never existing", status=500)
 
     # construct lock_key
     lock_key = user_id + ":lock"
@@ -200,9 +204,10 @@ with open(file='2pc/rollback.lua', mode='r') as f:
 def checkout_rollback(user_id, transaction_id):
     app.logger.info(f"Rollback {transaction_id}, {user_id}")
     # lookup the current transaction status
-    status: str | None = db.get(transaction_id)
+    status: bytes | None = db.get(transaction_id)
     
     if status is not None:
+        status = status.decode("utf-8")
         if status.startswith("ROLLBACKED"):
             return Response(f"Rollback {transaction_id} Successfully", status=200)
         elif status.startswith("COMMITTED"):

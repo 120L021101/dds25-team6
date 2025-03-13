@@ -1,6 +1,6 @@
-local txn_id = ARGV[1]
+local content = ARGV[1]
 
--- add this transaction to a set
-redis.call("SREM", "uncommit_txn_set", txn_id)
+-- remove this transaction from a set
+redis.call("SREM", "uncommit_txn_set", content)
 
 return "SUCCESS"
