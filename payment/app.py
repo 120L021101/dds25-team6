@@ -163,6 +163,8 @@ def checkout_commit(user_id, transaction_id, amount: str):
     status: str = db.get(transaction_id).decode('utf-8')
     if status.startswith("COMMITTED"):
         return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+    elif not status.startswith("PREPARED"):
+        return Response(f"{transaction_id} has been either rollbacked or never existing", status=500)
 
     # construct lock_key
     lock_key = user_id + ":lock"
@@ -197,8 +199,15 @@ with open(file='2pc/rollback.lua', mode='r') as f:
 @app.post('/checkout_rollback/<user_id>/<transaction_id>')
 def checkout_rollback(user_id, transaction_id):
 
+    # lookup the current transaction status
+    status: str = db.get(transaction_id).decode('utf-8')
+    if status.startswith("ROLLBACKED"):
+        return Response(f"Rollback {transaction_id} Successfully", status=200)
+    elif status.startswith("COMMITTED"):
+        return Response(f"Cannot Rollback a committed transaction", status=500)
+
     ret = checkout_rollback_script(keys=[user_id], args=[transaction_id])
-    return jsonify({"status" : ret.decode("utf-8")})
+    return Response(f"Rollback {transaction_id} Successfully", status=200)
 
 ## 2PC Ends ##
 
