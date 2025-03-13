@@ -158,12 +158,20 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
         send_post_request(f"{GATEWAY_URL}/stock/add/{item_id}/{quantity}")
 
 # This script is to log all the uncommited commit transactions, if the main server is down, backup can still continue to commit those
-with open(file='2pc/log_commit.lua', mode='r') as f:
+with open(file='2pc/commit_log.lua', mode='r') as f:
     log_commit = db.register_script(f.read())
 
 # Opposite to log_commit
-with open(file='2pc/unlog_commit.lua', mode='r') as f:
+with open(file='2pc/commit_unlog.lua', mode='r') as f:
     unlog_commit = db.register_script(f.read())
+
+# This script is to log all the unrollbacked commit transactions, if the main server is down, backup can still continue to rollback those
+with open(file='2pc/rollback_log.lua', mode='r') as f:
+    log_rollback = db.register_script(f.read())
+
+# Opposite to log_rollback
+with open(file='2pc/rollback_unlog.lua', mode='r') as f:
+    unlog_rollback = db.register_script(f.read())
 
 @app.post('/checkout/<order_id>')
 def checkout_2pc(order_id: str):
@@ -189,9 +197,10 @@ def checkout_2pc(order_id: str):
 
     # any failed, rollback
     if any(resp.status_code != 200 for resp in prepare_resp):
-        # even if this failed again, cuz the lock has lifetime, it should release the lock itself 
-        # but, for sure, can be improved by a similar log file which records transactions to be rollbacked
+        app.logger.info(f"Rollback {txn_id}")
+        log_rollback(keys=[], args=[txn_id])
         send_post_request(f"{GATEWAY_URL}/payment/checkout_rollback/{order_entry.user_id}/{txn_id}")
+        unlog_rollback(keys=[], args=[txn_id])
         return Response("Checkout Failed, Please Retry Later", status=200)
     
     app.logger.info(f"{prepare_resp}")

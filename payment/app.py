@@ -198,13 +198,15 @@ with open(file='2pc/rollback.lua', mode='r') as f:
 
 @app.post('/checkout_rollback/<user_id>/<transaction_id>')
 def checkout_rollback(user_id, transaction_id):
-
+    app.logger.info(f"Rollback {transaction_id}, {user_id}")
     # lookup the current transaction status
-    status: str = db.get(transaction_id).decode('utf-8')
-    if status.startswith("ROLLBACKED"):
-        return Response(f"Rollback {transaction_id} Successfully", status=200)
-    elif status.startswith("COMMITTED"):
-        return Response(f"Cannot Rollback a committed transaction", status=500)
+    status: str | None = db.get(transaction_id)
+    
+    if status is not None:
+        if status.startswith("ROLLBACKED"):
+            return Response(f"Rollback {transaction_id} Successfully", status=200)
+        elif status.startswith("COMMITTED"):
+            return Response(f"Cannot Rollback a committed transaction", status=500)
 
     ret = checkout_rollback_script(keys=[user_id], args=[transaction_id])
     return Response(f"Rollback {transaction_id} Successfully", status=200)
