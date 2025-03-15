@@ -107,6 +107,7 @@ def remove_stock(item_id: str, amount: int):
 
 ## Below is 2PC ##
 
+# Temporary test func
 @app.post('/item/luatest/<item_id>')
 def lua_test(item_id: int):
     try:
@@ -167,6 +168,39 @@ with open(file='2pc/rollback.lua', mode='r') as f:
 def checkout_rollback(item_id, transaction_id):
     return Response(f"UNIMPLEMENTED", status=400)
 
+with open(file='2pc/commit.lua', mode='r') as f:
+    checkout_commit_script = db.register_script(f.read())
+
+
+@app.post('/checkout_commit/<item_id>/<transaction_id>/<amount>')
+def checkout_commit(item_id, transaction_id, amount: str):
+    amount = int(amount)
+    # 1. Get lock and check timeout
+    try: 
+        lock_status = db.get(f"lock:{item_id}")
+        if lock_status == None:
+            # 1.5 Get lock failed
+            pass
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    # 2. Lua: get lock again, 
+    # del txn, upd amount, del lock
+    try:
+        ret = checkout_commit_script(keys=[item_id,], args=[transaction_id, amount])
+        result = ret.decode("utf-8")
+        app.logger.info(result)
+
+
+        # 3. Return Response
+        if "COMMITTED" in result:
+            return Response(result, status=200)
+        elif "Fatal Error" in result:
+            return Response(result, status=500)  
+    except Exception as e:
+        app.logger.error(f"Error in checkout commit: {str(e)}")
+        abort(500, "Internal Server Error")
+
+    
 ## 2PC Ends ##
 
 if __name__ == '__main__':
