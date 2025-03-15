@@ -41,21 +41,6 @@ class StockValue(Struct):
     stock: int
     price: int
 
-
-def get_item_from_db(item_id: str) -> StockValue | None:
-    # get serialized data
-    try:
-        entry: bytes = db.get(item_id)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    # deserialize data if it exists else return null
-    entry: StockValue | None = msgpack.decode(entry, type=StockValue) if entry else None
-    if entry is None:
-        # if item does not exist in the database; abort
-        abort(400, f"Item: {item_id} not found!")
-    return entry
-
-
 @app.post('/item/create/<price>')
 def create_item(price: int):
     key = str(uuid.uuid4())
@@ -122,20 +107,58 @@ def remove_stock(item_id: str, amount: int):
 
 ## Below is 2PC ##
 
+@app.post('/item/luatest/<item_id>')
+def lua_test(item_id: int):
+    try:
+        entry: bytes = db.get(item_id)
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    
+    return Response(status=200)
+
 # Prepare 
 with open(file='2pc/prepare.lua', mode='r') as f:
     checkout_prepare_script = db.register_script(f.read())
 
 @app.post('/checkout_prepare/<item_id>/<transaction_id>/<amount>')
 def checkout_prepare(item_id, transaction_id, amount: str):
-    return Response(f"UNIMPLEMENTED", status=400)
+    amount = int(amount)
+    # 1. check item availability
+    app.logger.info(f"PREPARE: {transaction_id}, {item_id}, {amount}")
+    stock_enrty = get_item_from_db(item_id=item_id)
+    # 2. check if sold out
+    app.logger.info(f"Item information: amount:{stock_enrty.stock}, price:{stock_enrty.price}")
+    if int(stock_enrty.stock) < amount:
+        abort(400, f"Item: {item_id} has been sold out!")
+    # lock stock version
+    # 3. lua: check + lock
+    try:
+        ret = checkout_prepare_script(keys=[item_id,], args=[transaction_id, amount])
+        result = ret.decode("utf-8")
+        app.logger.info(result)
+
+        if result == "PREPARED":
+            return Response(result, status=200)
+        elif "insufficient" in result:
+            return Response(result, status=400)  
+        else:
+            return Response(result, status=409)  # Conflict
+    except Exception as e:
+        app.logger.error(f"Error in checkout prepare: {str(e)}")
+        abort(500, "Internal Server Error")
+
+def get_item_from_db(item_id):
+    try:
+        entry: bytes = db.get(item_id)
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    entry: StockValue | None = msgpack.decode(entry, type=StockValue) if entry else None
+    if entry is None:
+        abort(409, f"Item: {item_id} not found!")
+    return entry
 
 # Commit
 REDIS_RETRIES = 10
-
-@app.post('/checkout_commit/<item_id>/<transaction_id>/<amount>')
-def checkout_commit(item_id, transaction_id, amount: str):
-    return Response(f"UNIMPLEMENTED", status=400)
 
 with open(file='2pc/rollback.lua', mode='r') as f:
     checkout_rollback_script = db.register_script(f.read())
