@@ -130,6 +130,7 @@ def checkout_prepare(item_id, transaction_id, amount: str):
     # 2. check if sold out
     app.logger.info(f"Item information: amount:{stock_enrty.stock}, price:{stock_enrty.price}")
     if int(stock_enrty.stock) < amount:
+        app.logger.info(f"Item: {item_id} has been sold out!")
         abort(400, f"Item: {item_id} has been sold out!")
     # lock stock version
     # 3. lua: check + lock
@@ -139,10 +140,13 @@ def checkout_prepare(item_id, transaction_id, amount: str):
         app.logger.info(result)
 
         if result == "PREPARED":
+            app.logger.info(f"Prepared: {item_id}, {result}")
             return Response(result, status=200)
         elif "insufficient" in result:
+            app.logger.log(400, f"Insufficient stock: {item_id}, {result}")
             return Response(result, status=400)  
         else:
+            app.logger.log(409, f"Conflict: {item_id}, {result}")
             return Response(result, status=409)  # Conflict
     except Exception as e:
         app.logger.error(f"Error in checkout prepare: {str(e)}")
@@ -166,7 +170,21 @@ with open(file='2pc/rollback.lua', mode='r') as f:
 
 @app.post('/checkout_rollback/<item_id>/<transaction_id>')
 def checkout_rollback(item_id, transaction_id):
-    return Response(f"UNIMPLEMENTED", status=400)
+    app.logger.info(f"ROLLBACK: {transaction_id}, {item_id}")
+    
+    try:
+        ret = checkout_rollback_script(keys=[item_id], args=[transaction_id])
+        result = ret.decode("utf-8")
+        app.logger.info(f"Rollback result: {result}")
+        
+        if "ROLLBACKED" in result:
+            return Response(result, status=200)
+        else:
+            # No lock or not belonging to txn
+            return Response(result, status=200)
+    except Exception as e:
+        app.logger.error(f"Error in checkout rollback: {str(e)}")
+        return abort(500, "Internal Server Error")
 
 with open(file='2pc/commit.lua', mode='r') as f:
     checkout_commit_script = db.register_script(f.read())
@@ -189,7 +207,6 @@ def checkout_commit(item_id, transaction_id, amount: str):
         ret = checkout_commit_script(keys=[item_id,], args=[transaction_id, amount])
         result = ret.decode("utf-8")
         app.logger.info(result)
-
 
         # 3. Return Response
         if "COMMITTED" in result:

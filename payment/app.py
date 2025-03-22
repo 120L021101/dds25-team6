@@ -134,10 +134,12 @@ def checkout_prepare(user_id, transaction_id, amount: str):
     user_entry = get_user_from_db(user_id=user_id)
     if user_entry.credit < int(amount):
         """ cannot prepare """
+        app.logger.info(500, f"Insufficient Money")
         return Response(f"Insufficient Money", status=500)
 
     ret = checkout_prepare_script(keys=[user_id,], args=[transaction_id,])
     app.logger.info(ret)
+    app.logger.info(f"PREPARE: {transaction_id}, {user_id}")
     return Response(f"{ret.decode("utf-8")}", status=200)
 
 # Commit

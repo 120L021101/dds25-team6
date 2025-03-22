@@ -35,5 +35,5 @@ if tonumber(current_amount) >= tonumber(amount) then
     end
 else
     -- Impossible branch
-    return "Fatal Error: Stock Value Error"
+    return "[Impossible Branch] Fatal Error: Stock Value Error "
 end
