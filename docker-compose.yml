@@ -31,7 +31,13 @@ services:
     image: order:latest
     environment:
       - GATEWAY_URL=http://gateway:80
+      - PYTHONUNBUFFERED=1
+      - GEVENT_SUPPORT=True  # 添加这个环境变量支持gevent调试
+    # command: sh -c "pip install debugpy && python -m debugpy --listen 0.0.0.0:5678 --wait-for-client -m gunicorn -b 0.0.0.0:5000 -w 1 -k gevent --worker-connections 1000 --timeout 300 app:app"
     command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
+    ports:
+      - "5000:5000"  # 应用端口
+      - "5678:5678"  # 调试端口
     env_file:
       - env/order_redis.env
     depends_on:
@@ -39,6 +45,23 @@ services:
     networks:
       my_network:
         ipv4_address: 192.168.1.20
+
+  order-service-2:
+    build: ./order
+    image: order:latest
+    environment:
+      - GATEWAY_URL=http://gateway:80
+    command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
+    ports:
+      - "5000:5000"  # 应用端口
+      - "5678:5678"  # 调试端口
+    env_file:
+      - env/order_redis.env
+    depends_on:
+      - order-db-sentinel
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.21
 
   order-service-2:
     build: ./order
@@ -130,6 +153,8 @@ services:
     build: ./stock
     image: stock:latest
     command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
+    ports:
+      - "5100:5000"
     env_file:
       - env/stock_redis.env
     depends_on:
@@ -222,13 +247,36 @@ services:
     build: ./payment
     image: payment:latest
     command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
+    # command: sh -c "pip install debugpy && python -m debugpy --listen 0.0.0.0:5678 --wait-for-client -m gunicorn -b 0.0.0.0:5000 -w 1 -k gevent --worker-connections 1000 --timeout 300 app:app"
     env_file:
       - env/payment_redis.env
+    ports:
+      - "5679:5678"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GEVENT_SUPPORT=True  # 添加这个环境变量支持gevent调试
     depends_on:
       - payment-db-sentinel
     networks:
       my_network:
         ipv4_address: 192.168.1.100
+
+  payment-service-2:
+    build: ./payment
+    image: payment:latest
+    command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
+    env_file:
+      - env/payment_redis.env
+    ports:
+      - "5679:5678"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GEVENT_SUPPORT=True  # 添加这个环境变量支持gevent调试
+    depends_on:
+      - payment-db-sentinel
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.101
 
   payment-service-2:
     build: ./payment
@@ -248,6 +296,8 @@ services:
     container_name: payment-db-master
     volumes:
       - ./data/payment-db/master:/data
+    ports:
+      - "6382:6379"
     command:
       [
         "redis-server",
@@ -268,8 +318,6 @@ services:
     hostname: payment-db-slave
     depends_on:
       - payment-db-master
-    ports:
-      - "6382:6379"
     volumes:
       - ./data/payment-db/slave1:/data
     command:

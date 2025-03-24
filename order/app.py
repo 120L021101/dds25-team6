@@ -28,17 +28,23 @@ sentinel = Sentinel(
 )
 
 # 始终从sentinel获得最新的master连接
-def get_redis_connection():
-    return sentinel.master_for("order-master", password=os.environ["REDIS_PASSWORD"], decode_responses=False)
+def get_redis_connection(db_num=0):
+    return sentinel.master_for(
+        "order-master", 
+        password=os.environ["REDIS_PASSWORD"], 
+        decode_responses=False,
+        db=db_num)
 
 # db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
 #                               port=int(os.environ['REDIS_PORT']),
 #                               password=os.environ['REDIS_PASSWORD'],
 #                               db=int(os.environ['REDIS_DB']))
 
-db = get_redis_connection()
+order_db = get_redis_connection(0)
+# log_db = get_redis_connection(1)
 
-def close_db_connection():
+
+def close_db_connection(db=order_db):
     db.close()
 
 
@@ -55,7 +61,7 @@ class OrderValue(Struct):
 def get_order_from_db(order_id: str) -> OrderValue | None:
     try:
         # get serialized data
-        entry: bytes = db.get(order_id)
+        entry: bytes = order_db.get(order_id)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     # deserialize data if it exists else return null
@@ -71,7 +77,7 @@ def create_order(user_id: str):
     key = str(uuid.uuid4())
     value = msgpack.encode(OrderValue(paid=False, items=[], user_id=user_id, total_cost=0))
     try:
-        db.set(key, value)
+        order_db.set(key, value)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({'order_id': key})
@@ -98,7 +104,7 @@ def batch_init_users(n: int, n_items: int, n_users: int, item_price: int):
     kv_pairs: dict[str, bytes] = {f"{i}": msgpack.encode(generate_entry())
                                   for i in range(n)}
     try:
-        db.mset(kv_pairs)
+        order_db.mset(kv_pairs)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({"msg": "Batch init for orders successful"})
@@ -147,7 +153,7 @@ def add_item(order_id: str, item_id: str, quantity: int):
     order_entry.items.append((item_id, int(quantity)))
     order_entry.total_cost += int(quantity) * item_json["price"]
     try:
-        db.set(order_id, msgpack.encode(order_entry))
+        order_db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(f"Item: {item_id} added to: {order_id} price updated to: {order_entry.total_cost}",
@@ -160,93 +166,230 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 # This script is to log all the uncommited commit transactions(and delete from rollback), if the main server is down, backup can still continue to commit those
 with open(file='2pc/commit_log.lua', mode='r') as f:
-    log_commit = db.register_script(f.read())
+    log_commit = order_db.register_script(f.read())
 
 # Opposite to log_commit
 with open(file='2pc/commit_unlog.lua', mode='r') as f:
-    unlog_commit = db.register_script(f.read())
+    unlog_commit = order_db.register_script(f.read())
 
 # This script is to log all the unrollbacked commit transactions, if the main server is down, backup can still continue to rollback those
 with open(file='2pc/rollback_log.lua', mode='r') as f:
-    log_rollback = db.register_script(f.read())
+    log_rollback = order_db.register_script(f.read())
 
 # Opposite to log_rollback
 with open(file='2pc/rollback_unlog.lua', mode='r') as f:
-    unlog_rollback = db.register_script(f.read())
+    unlog_rollback = order_db.register_script(f.read())
 
 @app.post('/checkout/<order_id>')
 def checkout_2pc(order_id: str):
     app.logger.info(f"Checking out {order_id}")
-    order_entry: OrderValue = get_order_from_db(order_id)
 
-    if order_entry.paid:
-        return Response("Has been Checkout, can't checkout again", status=200)
+    # Prevent multiple threads from checking out the same 
+    # Idempotency
+    order_lock = f"lock:{order_id}"
 
-    import uuid
+    old_key = order_db.set(order_lock, os.getpid(), nx=True, get=True)#, ex=30000)    
+    acqiured_lock = (old_key is None)
+
+    try:
+        if not acqiured_lock:
+            return Response(f"Failed to get the lock, current thread: {old_key}", status=409)
+        
+        order_entry: OrderValue = get_order_from_db(order_id)
+        
+        if order_entry.paid: 
+            return Response("Has been Checkout, can't checkout again", status=200)
+
+        txn_id = get_uuid()
+
+        # log this transaction to rollback set before try to prepare
+        log_item = json.dumps({
+            "transaction_id" : txn_id,
+            "order_id": order_id,
+            "user_id" : order_entry.user_id,
+            "items" : order_entry.items,
+            "total_cost": order_entry.total_cost,
+        })
+        # Add to rollback set
+        log_rollback(keys=[], args=[log_item])
+
+        # prepare phase
+        resp_prepare = checkout_prepare(order_entry, log_item, txn_id, order_id)
+
+        # 根据准备结果决定是否立即提交
+        if resp_prepare.status_code == 200:
+            try:
+                checkout_commit(order_entry, order_id, txn_id, log_item)
+                # 只有在成功提交后才释放锁
+                order_db.delete(order_lock)
+            except Exception as e:
+                app.logger.error(f"提交失败: {str(e)}")
+                # 提交失败，让recovery机制处理
+        else:
+            # 准备失败，释放锁让其他操作继续
+            order_db.delete(order_lock)
+
+        # Prepare success, commit immediately
+        # Or will be processed later by the commit set scanner
+        # if resp_prepare.status_code == 200:
+        #     checkout_commit(order_entry, order_id, txn_id)
+        # order_db.delete(order_lock)
+        
+        # scan commit sets, help commit
+        commit_commit_set()
+        # scan rollback sets, help rollback
+        rollback_rollback_set()
+
+        return resp_prepare
+    finally:
+        if acqiured_lock and order_db.get(order_lock) == os.getpid():
+            order_db.delete(order_lock)
+    
+
+
+def checkout_commit(order_entry: OrderValue, order_id: str, txn_id: str, log_item) -> Response:
+    # commit phase
+    # first, log this to-be-committed transaction
+    log_commit(keys=[], args=[log_item])
+
+    # try to commit it
+    COMMIT_RETRIES = 10
+    commit_resp_payment = None
+    for _ in range(COMMIT_RETRIES):
+        commit_resp_payment = send_post_request(
+            f"{GATEWAY_URL}/payment/checkout_commit/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}"
+        )
+        
+        # Send stock commit requests for each item
+        stock_responses = []
+        for item_id, amount in order_entry.items:
+            resp = send_post_request(f"{GATEWAY_URL}/stock/checkout_commit/{item_id}/{txn_id}/{amount}")
+            stock_responses.append(resp)
+                
+        app.logger.info(f"[Order checkout_commit] Response: {commit_resp_payment}")
+        if commit_resp_payment and all(resp and resp.status_code == 200 for resp in stock_responses):
+            break
+    
+    # update status of this order
+    order_entry.paid = True
+    for _ in range(COMMIT_RETRIES):
+        try: order_db.set(order_id, msgpack.encode(order_entry))
+        except: continue
+        
+    # if successful, remove this transaction from the log set
+    unlog_commit(keys=[], args=[log_item])
+
+def checkout_prepare(order_entry: OrderValue, log_item, txn_id, order_id) -> Response:
+    try:
+        prepare_resp = [
+                # payment prepare
+                send_post_request(f"{GATEWAY_URL}/payment/checkout_prepare/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}")
+            ] + [
+                # stock prepare
+                send_post_request(f"{GATEWAY_URL}/stock/checkout_prepare/{item_id}/{txn_id}/{amount}") 
+                for (item_id, amount) in order_entry.items
+            ]
+        
+
+        all_success = all(resp.status_code == 200 for resp in prepare_resp)
+
+        if all_success:
+            log_commit(keys=[], args=[log_item])
+            # order_entry.paid = True
+            # order_db.set(order_id, msgpack.encode(order_entry))
+            app.logger.info(f"[Prepare] Checkout-Prepare admitted, txn-id: {txn_id}")
+            return Response("[Prepare] Checkout-Prepare admitted. Result may be updated later in mins", status=200)
+        else:
+            # 准备阶段失败，记录详细错误信息
+            failed_services = [
+                f"{i}:{resp.status_code}" 
+                for i, resp in enumerate(prepare_resp) 
+                if resp.status_code != 200
+            ]
+            app.logger.error(f"[Prepare <Error>] Failed services: {','.join(failed_services)}, txn-id: {txn_id}")
+            return Response("Error: Checkout failed, try again later", status=409)
+    except Exception as e:
+        app.logger.error(f"Error in checkout prepare: {str(e)}")
+        return Response(f"Error: Exception during checkout: {str(e)}", status=409)
+
+
+def commit_commit_set():
+    # finally then, try to commit all the commit set
+    commit_set = order_db.smembers("uncommit_txn_set")
+    # app.logger.info(f"[Scanner] Committing {commit_set}")
+    app.logger.info(f"[Scanner] Committing")
+    for item in commit_set:
+        try:
+            log_item = json.loads(item.decode("utf-8"))
+            commit_lock = "lock:commit:" + log_item.get("transaction_id")
+            old_key = order_db.set(commit_lock, os.getpid(), nx=True, get=True)#, ex=30)    
+            acqiured_lock = (old_key is None)
+            try:
+                if acqiured_lock:
+                    commit_resp = [
+                        # payment commit
+                        send_post_request(f"{GATEWAY_URL}/payment/checkout_commit/" + 
+                            f"{log_item['user_id']}/{log_item['transaction_id']}/{log_item['total_cost']}")
+                    ] + [
+                        # order commit
+                        send_post_request(f"{GATEWAY_URL}/stock/checkout_commit/{item_id}/{amount}")
+                        for (item_id, amount) in log_item['items']
+                    ]
+                    app.logger.info(f"commit response: {commit_resp[0].text}")
+                    if all(resp.status_code == 200 for resp in commit_resp):
+                        unlog_commit(keys=[], args=[log_item])
+                        # Create an OrderValue from log_item and mark it as paid
+                        order_id = log_item['order_id']
+                        order_entry = OrderValue(
+                            paid=True,
+                            items=log_item['items'],
+                            user_id=log_item['user_id'],
+                            total_cost=log_item['total_cost']
+                        )
+                        # Try to update the order in the database
+                        for _ in range(10):
+                            try:
+                                order_db.set(order_id, msgpack.encode(order_entry))
+                                break
+                            except:
+                                continue
+            finally:
+                if acqiured_lock and order_db.get(commit_lock) == os.getpid():
+                    order_db.delete(commit_lock)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            # 记录错误并尝试清理无效数据
+            app.logger.error(f"Invalid JSON in uncommit_txn_set: {item}, Error: {str(e)}")
+
+
+def rollback_rollback_set():
+    # finally first, try to rollback all the rollback set
+    rollback_set = order_db.smembers("unrollback_txn_set")
+    # app.logger.info(f"[Scanner] Rollbacking {rollback_set}")
+    app.logger.info(f"[Scanner] Rollbacking")
+    for log_item_rllbck in [ json.loads(item.decode("utf-8")) for item in rollback_set ]:
+        rollback_lock = "lock:rollback:" + log_item_rllbck.get("transaction_id")
+        old_key = order_db.set(rollback_lock, os.getpid(), nx=True, get=True)#, ex=30)    
+        acqiured_lock = (old_key is None)
+        try:
+            if acqiured_lock:
+                rollback_resp = [
+                    # payment rollback
+                    send_post_request(f"{GATEWAY_URL}/payment/checkout_rollback/{log_item_rllbck['user_id']}/{log_item_rllbck['transaction_id']}")
+                ] + [
+                    # order rollback
+                    send_post_request(f"{GATEWAY_URL}/stock/checkout_rollback/{item_id}/{log_item_rllbck['transaction_id']}")
+                    for (item_id, _) in log_item_rllbck['items']
+                ]
+                if all(resp.status_code == 200 for resp in rollback_resp):
+                    unlog_rollback(keys=[], args=[json.dumps(log_item_rllbck)])
+        finally:
+            if acqiured_lock and order_db.get(rollback_lock) == os.getpid():
+                order_db.delete(rollback_lock)
+
+def get_uuid() -> str:
     txn_id = str(uuid.uuid4())
     app.logger.info(f"Generated Transaction ID: {txn_id}")
-
-    # log this transaction to rollback set before try to prepare
-    log_item = json.dumps({
-        "transaction_id" : txn_id,
-        "order_id": order_id,
-        "user_id" : order_entry.user_id,
-        "items" : order_entry.items,
-        "total_cost": order_entry.total_cost,
-    })
-    log_rollback(keys=[], args=[log_item])
-
-    # prepare phase
-    prepare_resp = [
-        # payment prepare
-        send_post_request(f"{GATEWAY_URL}/payment/checkout_prepare/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}")
-    ] + [
-        # stock prepare
-        # send_post_request(f"{GATEWAY_URL}/stock/checkout_prepare/{item_id}/{txn_id}/{amount}") 
-        #     for (item_id, amount) in order_entry.items
-    ]
-
-    # nothing failed, add to commit set
-    resp = Response("Checkout Failed, Please Retry Later", status=200)
-    if all(resp.status_code == 200 for resp in prepare_resp):
-        log_commit(keys=[], args=[log_item])
-        order_entry.paid = True
-        db.set(order_id, msgpack.encode(order_entry))
-        resp = Response("Checkout admitted. Result may be updated later in mins", status=200)
-
-    # finally first, try to rollback all the rollback set
-    rollback_set = db.smembers("unrollback_txn_set")
-    app.logger.info(f"Rollback {rollback_set}")
-
-    for log_item_rllbck in [ json.loads(item.decode("utf-8")) for item in rollback_set ]:
-        rollback_resp = [
-            # payment rollback
-            send_post_request(f"{GATEWAY_URL}/payment/checkout_rollback/{log_item_rllbck['user_id']}/{log_item_rllbck['transaction_id']}")
-        ] + [
-            # order rollback
-        ]
-        if all(resp.status_code == 200 for resp in rollback_resp):
-            unlog_rollback(keys=[], args=[json.dumps(log_item_rllbck)])
-
-    # finally then, try to commit all the commit set
-    commit_set = db.smembers("uncommit_txn_set")
-    app.logger.info(f"Rollback {commit_set}")
-
-    for log_item_cmmt in [ json.loads(item.decode("utf-8")) for item in commit_set ]:
-        commit_resp = [
-            # payment commit
-            send_post_request(f"{GATEWAY_URL}/payment/checkout_commit/" + 
-                f"{log_item_cmmt['user_id']}/{log_item_cmmt['transaction_id']}/{log_item_cmmt['total_cost']}")
-        ] + [
-            # order commit
-        ]
-        app.logger.info(f"commit response: {commit_resp[0].text}")
-        if all(resp.status_code == 200 for resp in commit_resp):
-            unlog_commit(keys=[], args=[json.dumps(log_item_cmmt)])
-
-    return resp
-
-
+    return txn_id
     # if True:
     #     send_post_request(f"{GATEWAY_URL}/payment/checkout_rollback/{order_entry.user_id}/{txn_id}")
     #     return Response("Checkout Failed, Please Retry Later", status=200)
@@ -282,7 +425,7 @@ def checkout_2pc(order_id: str):
 
     # return Response("Checkout successful", status=200)
 
-def checkout(order_id: str):
+def OLD_checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
     # get the quantity per item
@@ -306,7 +449,7 @@ def checkout(order_id: str):
         abort(400, "User out of credit")
     order_entry.paid = True
     try:
-        db.set(order_id, msgpack.encode(order_entry))
+        order_db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     app.logger.debug("Checkout successful")

@@ -128,7 +128,44 @@ with open(file='2pc/prepare.lua', mode='r') as f:
 
 @app.post('/checkout_prepare/<item_id>/<transaction_id>/<amount>')
 def checkout_prepare(item_id, transaction_id, amount: str):
-    return Response(f"UNIMPLEMENTED", status=400)
+    amount = int(amount)
+    # 1. check item availability
+    app.logger.info(f"[Stock]: PREPARE: {transaction_id}, {item_id}, {amount}")
+    stock_enrty = get_item_from_db(item_id=item_id)
+    # 2. check if sold out
+    app.logger.info(f"Item information: amount:{stock_enrty.stock}, price:{stock_enrty.price}, sold_out:{stock_enrty.stock < amount}")
+    if int(stock_enrty.stock) < amount:
+        app.logger.info(f"Item: {item_id} has been sold out!")
+        abort(400, f"Item: {item_id} has been sold out!")
+    # lock stock version
+    # 3. lua: check + lock
+    try:
+        ret = checkout_prepare_script(keys=[item_id,], args=[transaction_id, amount])
+        result = ret.decode("utf-8")
+        app.logger.info(result)
+
+        if "PREPARED" in result:
+            app.logger.info(f"[Stock]: Prepared: {item_id}, {result}")
+            return Response(result, status=200)
+        elif "insufficient" in result:
+            app.logger.error(f"[Stock<Error>]: Insufficient stock: {item_id}, {result}")
+            return Response(result, status=400)  
+        else:
+            app.logger.error(f"[Stock<Error>]: Conflict: {item_id}, [prepare.lua]-{result}")
+            return Response(result, status=409)  # Conflict
+    except Exception as e:
+        app.logger.error(f"[Stock] Redis Internal Error: in checkout prepare: {str(e)}")
+        abort(404, "Internal Server Error")
+
+def get_item_from_db(item_id):
+    try:
+        entry: bytes = db.get(item_id)
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    entry: StockValue | None = msgpack.decode(entry, type=StockValue) if entry else None
+    if entry is None:
+        abort(409, f"Item: {item_id} not found!")
+    return entry
 
 # Commit
 REDIS_RETRIES = 10
@@ -142,8 +179,56 @@ with open(file='2pc/rollback.lua', mode='r') as f:
 
 @app.post('/checkout_rollback/<item_id>/<transaction_id>')
 def checkout_rollback(item_id, transaction_id):
-    return Response(f"UNIMPLEMENTED", status=400)
+    app.logger.info(f"[Stock] Start ROLLBACK: {transaction_id}, {item_id}")
+    
+    try:
+        ret = checkout_rollback_script(keys=[item_id], args=[transaction_id])
+        result = ret.decode("utf-8")
+        app.logger.info(f"[Stock] Rollback result: {result}")
+        
+        if "ROLLBACKED" in result:
+            return Response(result, status=200)
+        else:
+            # No lock or not belonging to txn
+            return Response(result, status=200)
+    except Exception as e:
+        app.logger.error(f"Error in checkout rollback: {str(e)}")
+        return abort(404, "Internal Server Error")
 
+with open(file='2pc/commit.lua', mode='r') as f:
+    checkout_commit_script = db.register_script(f.read())
+
+
+@app.post('/checkout_commit/<item_id>/<transaction_id>/<amount>')
+def checkout_commit(item_id, transaction_id, amount: str):
+    amount = int(amount)
+    # 1. Get lock and check timeout
+    # try: 
+    #     lock_status = db.get(f"lock:{item_id}")
+    #     if lock_status == None:
+    #         # 1.5 Get lock failed
+    #         pass
+    # except redis.exceptions.RedisError:
+    #     return abort(400, DB_ERROR_STR)
+    # 2. Lua: get lock again, 
+    # del txn, upd amount, del lock
+    try:
+        ret = checkout_commit_script(keys=[item_id,], args=[transaction_id, amount])
+        result = ret.decode("utf-8")
+        app.logger.info(f'[Stock Commit.lua] {result}')
+
+        # 3. Return Response
+        if "COMMITTED" in result:
+            app.logger.info(f'[Stock Commit] Stock committed: {transaction_id}')
+            return Response(result, status=200)
+        elif "Fatal Error" in result:
+            app.logger.info(f'[Stock Commit] Fatal error: {transaction_id}')
+            return Response(result, status=404)  
+    except Exception as e:
+        app.logger.error(f"Error in checkout commit: {str(e)}")
+        abort(404, "Internal Server Error")
+
+    
 ## 2PC Ends ##
 
 if __name__ == '__main__':

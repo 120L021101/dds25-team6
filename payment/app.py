@@ -130,14 +130,21 @@ with open(file='2pc/prepare.lua', mode='r') as f:
 
 @app.post('/checkout_prepare/<user_id>/<transaction_id>/<amount>')
 def checkout_prepare(user_id, transaction_id, amount: str):
-    app.logger.info(f"PREPARE: {transaction_id}, {user_id}")
+    app.logger.info(f"[Payment] PREPARE: {transaction_id}, {user_id}")
+
     user_entry = get_user_from_db(user_id=user_id)
     if user_entry.credit < int(amount):
         """ cannot prepare """
+        app.logger.error(f"Insufficient Money")
         return Response(f"Insufficient Money", status=500)
 
     ret = checkout_prepare_script(keys=[user_id,], args=[transaction_id,])
-    app.logger.info(ret)
+    if ret.decode('utf-8') == 'Failed, Already Locked':
+        return Response(f"[Payment] Transaction {transaction_id} is already in progress", status=409)
+    
+    app.logger.info(f"[checkout_prepare.lua] Success: {ret.decode('utf-8')}")
+    app.logger.info(f"[Payment] PREPARED: {transaction_id}, {user_id}")
+    app.logger.info(f"Lock status after prepare: {db.get('lock:'+user_id)}")
     return Response(f"{ret.decode("utf-8")}", status=200)
 
 # Commit
@@ -150,7 +157,7 @@ even the response message should be the same
 @app.post('/checkout_commit/<user_id>/<transaction_id>/<amount>')
 def checkout_commit(user_id, transaction_id, amount: str):
     # class impedance, have to do commit here
-    app.logger.info(f"COMMIT: {transaction_id}, {user_id}")
+    # app.logger.info(f"[payment] COMMIT: {transaction_id}, {user_id}")
 
     # get user object
     user_entry = None
@@ -159,19 +166,23 @@ def checkout_commit(user_id, transaction_id, amount: str):
         if user_entry is None:
             time.sleep(1.0)
 
-    app.logger.info(f"COMMIT: {transaction_id}, {user_id}")
+    app.logger.info(f"[payment] Now COMMIT: {transaction_id}, {user_id}")
     # lookup the current transaction status
-    status: bytes | None = db.get(transaction_id)
+    status: bytes | None = db.get("txn:" + transaction_id)
     if status is not None:
         status = status.decode("utf-8")
         app.logger.info(f"current state: {status}")
         if status.startswith("COMMITTED"):
             return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
         elif not status.startswith("PREPARED"):
-            return Response(f"{transaction_id} has been either rollbacked or never existing", status=500)
-
+            return Response(f"{transaction_id} has been either rollbacked or never existing", status=409)
+    else:
+        # Scenario: Transaction not found? -- should never happen
+        app.logger.info(f"[payment_commit<ERROR>] Transaction {transaction_id} not found")
+        return Response(f"{transaction_id} not found", status=404)
+    
     # construct lock_key
-    lock_key = user_id + ":lock"
+    lock_key = "lock:" + user_id
     trx_id_lock = None
     for _ in range(REDIS_RETRIES):
         try: trx_id_lock = db.get(lock_key).decode('utf-8')
@@ -191,8 +202,8 @@ def checkout_commit(user_id, transaction_id, amount: str):
         return abort(400, DB_ERROR_STR)
     
     # Release the lock, update the transaction status to commited
+    db.set("txn:" + transaction_id, f"COMMITTED")
     db.delete(lock_key)
-    db.set(transaction_id, f"COMMITTED")
 
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
@@ -202,19 +213,23 @@ with open(file='2pc/rollback.lua', mode='r') as f:
 
 @app.post('/checkout_rollback/<user_id>/<transaction_id>')
 def checkout_rollback(user_id, transaction_id):
-    app.logger.info(f"Rollback {transaction_id}, {user_id}")
+    app.logger.info(f"[Payment] Start Rollback {transaction_id}, {user_id}")
     # lookup the current transaction status
-    status: bytes | None = db.get(transaction_id)
+    status: bytes | None = db.get("txn:"+transaction_id)
     
     if status is not None:
         status = status.decode("utf-8")
         if status.startswith("ROLLBACKED"):
-            return Response(f"Rollback {transaction_id} Successfully", status=200)
+            return Response(f"[Payment] Rollback {transaction_id} Successfully", status=200)
         elif status.startswith("COMMITTED"):
-            return Response(f"Cannot Rollback a committed transaction", status=500)
+            return Response(f"[Payment] Cannot Rollback a committed transaction", status=409)
 
     ret = checkout_rollback_script(keys=[user_id], args=[transaction_id])
-    return Response(f"Rollback {transaction_id} Successfully", status=200)
+    if ret.decode('utf-8') == 'ROLLBACKED':
+        return Response(f"[Payment Success] Rollback {transaction_id} Successfully", status=200)
+    else:
+        return Response(f"[Payment Failed] Rollback {transaction_id} Failed", status=409)
+    
 
 ## 2PC Ends ##
 
