@@ -193,8 +193,6 @@ def checkout_2pc(order_id: str):
         "user_id" : order_entry.user_id,
         "items" : order_entry.items,
         "total_cost": order_entry.total_cost,
-        "item_id": order_entry.item_id,
-        "amount": order_entry.amount,
     })
     log_rollback(keys=[], args=[log_item])
 
@@ -204,7 +202,7 @@ def checkout_2pc(order_id: str):
         send_post_request(f"{GATEWAY_URL}/payment/checkout_prepare/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}")
     ] + [
         # stock prepare
-        send_post_request(f"{GATEWAY_URL}/stock/checkout_prepare/{order_entry.item_id}/{txn_id}/{order_entry.amount}") 
+        # send_post_request(f"{GATEWAY_URL}/stock/checkout_prepare/{item_id}/{txn_id}/{amount}") 
         #     for (item_id, amount) in order_entry.items
     ]
 
