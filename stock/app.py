@@ -143,10 +143,10 @@ def checkout_prepare(item_id, transaction_id, amount: str):
             app.logger.info(f"[Stock]: Prepared: {item_id}, {result}")
             return Response(result, status=200)
         elif "insufficient" in result:
-            app.logger.log(400, f"[Stock<Error>]: Insufficient stock: {item_id}, {result}")
+            app.logger.error(f"[Stock<Error>]: Insufficient stock: {item_id}, {result}")
             return Response(result, status=400)  
         else:
-            app.logger.log(409, f"[Stock<Error>]: Conflict: {item_id}, [prepare.lua]-{result}")
+            app.logger.log(f"[Stock<Error>]: Conflict: {item_id}, [prepare.lua]-{result}")
             return Response(result, status=409)  # Conflict
     except Exception as e:
         app.logger.error(f"[Stock] Redis Internal Error: in checkout prepare: {str(e)}")
