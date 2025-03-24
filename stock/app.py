@@ -146,7 +146,7 @@ def checkout_prepare(item_id, transaction_id, amount: str):
             app.logger.log(400, f"[Stock<Error>]: Insufficient stock: {item_id}, {result}")
             return Response(result, status=400)  
         else:
-            app.logger.log(409, f"[Stock<Error>]: Conflict: {item_id}, {result}")
+            app.logger.log(409, f"[Stock<Error>]: Conflict: {item_id}, [prepare.lua]-{result}")
             return Response(result, status=409)  # Conflict
     except Exception as e:
         app.logger.error(f"[Stock] Redis Internal Error: in checkout prepare: {str(e)}")
@@ -194,24 +194,26 @@ with open(file='2pc/commit.lua', mode='r') as f:
 def checkout_commit(item_id, transaction_id, amount: str):
     amount = int(amount)
     # 1. Get lock and check timeout
-    try: 
-        lock_status = db.get(f"lock:{item_id}")
-        if lock_status == None:
-            # 1.5 Get lock failed
-            pass
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+    # try: 
+    #     lock_status = db.get(f"lock:{item_id}")
+    #     if lock_status == None:
+    #         # 1.5 Get lock failed
+    #         pass
+    # except redis.exceptions.RedisError:
+    #     return abort(400, DB_ERROR_STR)
     # 2. Lua: get lock again, 
     # del txn, upd amount, del lock
     try:
         ret = checkout_commit_script(keys=[item_id,], args=[transaction_id, amount])
         result = ret.decode("utf-8")
-        app.logger.info(result)
+        app.logger.info(f'[Stock Commit.lua] {result}')
 
         # 3. Return Response
         if "COMMITTED" in result:
+            app.logger.info(f'[Stock Commit] Stock committed: {transaction_id}')
             return Response(result, status=200)
         elif "Fatal Error" in result:
+            app.logger.info(f'[Stock Commit] Fatal error: {transaction_id}')
             return Response(result, status=404)  
     except Exception as e:
         app.logger.error(f"Error in checkout commit: {str(e)}")

@@ -367,7 +367,7 @@ def rollback_rollback_set():
     # app.logger.info(f"[Scanner] Rollbacking {rollback_set}")
     app.logger.info(f"[Scanner] Rollbacking")
     for log_item_rllbck in [ json.loads(item.decode("utf-8")) for item in rollback_set ]:
-        rollback_lock = "lock:rollback" + log_item_rllbck.get("transaction_id")
+        rollback_lock = "lock:rollback:" + log_item_rllbck.get("transaction_id")
         old_key = order_db.set(rollback_lock, os.getpid(), nx=True, get=True)#, ex=30)    
         acqiured_lock = (old_key is None)
         try:
