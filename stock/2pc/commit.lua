@@ -23,7 +23,7 @@ if txn_status == "COMMITTED" then
 end
 
 if tonumber(current_amount) >= tonumber(amount) then
-    if lock_owner == txn_key then
+    if lock_owner == txn_id then
     -- upd txn, upd amount, del lock
         stock_value.stock = stock_value.stock - tonumber(amount)
         redis.call("SET", txn_key, "COMMITTED")

@@ -18,7 +18,7 @@ local current_amount = stock_value.stock
 
 if tonumber(current_amount) >= tonumber(amount) then
     -- if redis.call("SETNX", lock_key, txn_key, "NX", "EX", 1800) == 1 then
-    if redis.call("SETNX", lock_key, txn_key) == 1 then
+    if redis.call("SETNX", lock_key, txn_id) == 1 then
         redis.call("SET", txn_key, "PREPARED")
         -- redis.call("EXPIRE", txn_key)
         return "PREPARED"

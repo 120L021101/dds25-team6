@@ -125,10 +125,10 @@ with open(file='2pc/prepare.lua', mode='r') as f:
 def checkout_prepare(item_id, transaction_id, amount: str):
     amount = int(amount)
     # 1. check item availability
-    app.logger.info(f"PREPARE: {transaction_id}, {item_id}, {amount}")
+    app.logger.info(f"[Stock]: PREPARE: {transaction_id}, {item_id}, {amount}")
     stock_enrty = get_item_from_db(item_id=item_id)
     # 2. check if sold out
-    app.logger.info(f"Item information: amount:{stock_enrty.stock}, price:{stock_enrty.price}")
+    app.logger.info(f"Item information: amount:{stock_enrty.stock}, price:{stock_enrty.price}, sold_out:{stock_enrty.stock < amount}")
     if int(stock_enrty.stock) < amount:
         app.logger.info(f"Item: {item_id} has been sold out!")
         abort(400, f"Item: {item_id} has been sold out!")
@@ -140,17 +140,17 @@ def checkout_prepare(item_id, transaction_id, amount: str):
         app.logger.info(result)
 
         if result == "PREPARED":
-            app.logger.info(f"Prepared: {item_id}, {result}")
+            app.logger.info(f"[Stock]: Prepared: {item_id}, {result}")
             return Response(result, status=200)
         elif "insufficient" in result:
-            app.logger.log(400, f"Insufficient stock: {item_id}, {result}")
+            app.logger.log(400, f"[Stock<Error>]: Insufficient stock: {item_id}, {result}")
             return Response(result, status=400)  
         else:
-            app.logger.log(409, f"Conflict: {item_id}, {result}")
+            app.logger.log(409, f"[Stock<Error>]: Conflict: {item_id}, {result}")
             return Response(result, status=409)  # Conflict
     except Exception as e:
-        app.logger.error(f"Error in checkout prepare: {str(e)}")
-        abort(500, "Internal Server Error")
+        app.logger.error(f"[Stock] Redis Internal Error: in checkout prepare: {str(e)}")
+        abort(404, "Internal Server Error")
 
 def get_item_from_db(item_id):
     try:
@@ -170,12 +170,12 @@ with open(file='2pc/rollback.lua', mode='r') as f:
 
 @app.post('/checkout_rollback/<item_id>/<transaction_id>')
 def checkout_rollback(item_id, transaction_id):
-    app.logger.info(f"ROLLBACK: {transaction_id}, {item_id}")
+    app.logger.info(f"[Stock] Start ROLLBACK: {transaction_id}, {item_id}")
     
     try:
         ret = checkout_rollback_script(keys=[item_id], args=[transaction_id])
         result = ret.decode("utf-8")
-        app.logger.info(f"Rollback result: {result}")
+        app.logger.info(f"[Stock] Rollback result: {result}")
         
         if "ROLLBACKED" in result:
             return Response(result, status=200)
@@ -184,7 +184,7 @@ def checkout_rollback(item_id, transaction_id):
             return Response(result, status=200)
     except Exception as e:
         app.logger.error(f"Error in checkout rollback: {str(e)}")
-        return abort(500, "Internal Server Error")
+        return abort(404, "Internal Server Error")
 
 with open(file='2pc/commit.lua', mode='r') as f:
     checkout_commit_script = db.register_script(f.read())
@@ -212,10 +212,10 @@ def checkout_commit(item_id, transaction_id, amount: str):
         if "COMMITTED" in result:
             return Response(result, status=200)
         elif "Fatal Error" in result:
-            return Response(result, status=500)  
+            return Response(result, status=404)  
     except Exception as e:
         app.logger.error(f"Error in checkout commit: {str(e)}")
-        abort(500, "Internal Server Error")
+        abort(404, "Internal Server Error")
 
     
 ## 2PC Ends ##
