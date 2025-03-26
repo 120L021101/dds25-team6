@@ -138,7 +138,7 @@ def checkout_prepare(user_id, transaction_id, amount: str):
         app.logger.error(f"Insufficient Money")
         return Response(f"Insufficient Money", status=500)
 
-    ret = checkout_prepare_script(keys=[user_id,], args=[transaction_id,])
+    ret : bytes = checkout_prepare_script(keys=[user_id,], args=[transaction_id,])
     if ret.decode('utf-8') == 'Failed, Already Locked':
         return Response(f"[Payment] Transaction {transaction_id} is already in progress", status=409)
     
@@ -185,8 +185,10 @@ def checkout_commit(user_id, transaction_id, amount: str):
     lock_key = "lock:" + user_id
     trx_id_lock = None
     for _ in range(REDIS_RETRIES):
-        try: trx_id_lock = db.get(lock_key).decode('utf-8')
-        except: time.sleep(1.0)
+        try: 
+            trx_id_lock = db.get(lock_key).decode('utf-8')
+            break
+        except: time.sleep(0.1)
     
     # current lock is not owned by this transaction
     # actually, should never happen, So only for debugging, currently use assert
