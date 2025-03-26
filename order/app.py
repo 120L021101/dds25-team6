@@ -214,18 +214,14 @@ def checkout_2pc(order_id: str):
                 # only release lock when commit successfully
                 order_db.delete(order_lock)
             except Exception as e:
-                app.logger.error(f"提交失败: {str(e)}")
+                app.logger.error(f"Failed to commit: {str(e)}")
                 # commit filaed, let recovery mechanism to process(retry) commit later
         else:
             # prepare failed, release lock to let others continue
             order_db.delete(order_lock)
-
-        # Prepare success, commit immediately
-        # Or will be processed later by the commit set scanner
-        # if resp_prepare.status_code == 200:
-        #     checkout_commit(order_entry, order_id, txn_id)
-        # order_db.delete(order_lock)
         
+        # TODO: should delete these when the set conflicts or other potential issues are solved, 
+        # ctrl+F "TODO: commit commit set" to locate detailed info
         # scan commit sets, help commit
         commit_commit_set()
         # scan rollback sets, help rollback
@@ -283,10 +279,7 @@ def checkout_prepare(order_entry: OrderValue, txn_id, order_id) -> Response:
                 for (item_id, amount) in order_entry.items
             ]
         
-
-        all_success = all(resp.status_code == 200 for resp in prepare_resp)
-
-        if all_success:
+        if all(resp.status_code == 200 for resp in prepare_resp):
             log_commit(keys=[], args=[str((order_id, txn_id))])
             # order_entry.paid = True
             # order_db.set(order_id, msgpack.encode(order_entry))
@@ -354,6 +347,21 @@ def rollback_rollback_set():
             # so no need to check if this lock is owned by this process
             if acqiured_lock and order_db.get(rollback_lock) == os.getpid():
                 order_db.delete(rollback_lock)
+        
+def background_commit_and_rollback():
+    while True:
+        # Run the commit and rollback set scanners periodically
+        commit_commit_set()
+        rollback_rollback_set()
+        time.sleep(1)  # Sleep for a while before running again
+import threading
+# Start the background thread when the app starts
+background_thread = threading.Thread(target=background_commit_and_rollback)
+background_thread.daemon = True  # This ensures it runs in the background and terminates with the main program
+# TODO: commit commit set and rollback rollback set should be done in a background process,
+#       but for now, some conflict occur due to concurrent visiting set
+#       when thats solved, should uncomment the below line of code
+# background_thread.start()
 
 def get_uuid() -> str:
     txn_id = str(uuid.uuid4())
