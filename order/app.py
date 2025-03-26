@@ -201,25 +201,16 @@ def checkout_2pc(order_id: str):
             return Response("Has been Checkout, can't checkout again", status=200)
 
         txn_id = get_uuid()
-
-        # log this transaction to rollback set before try to prepare
-        log_item = json.dumps({
-            "transaction_id" : txn_id,
-            "order_id": order_id,
-            "user_id" : order_entry.user_id,
-            "items" : order_entry.items,
-            "total_cost": order_entry.total_cost,
-        })
         # Add to rollback set
-        log_rollback(keys=[], args=[log_item])
+        log_rollback(keys=[], args=[str((order_id, txn_id))])
 
         # prepare phase
-        resp_prepare = checkout_prepare(order_entry, log_item, txn_id, order_id)
+        resp_prepare = checkout_prepare(order_entry, txn_id, order_id)
 
         # 根据准备结果决定是否立即提交
         if resp_prepare.status_code == 200:
             try:
-                checkout_commit(order_entry, order_id, txn_id, log_item)
+                checkout_commit(order_entry, order_id, txn_id)
                 # 只有在成功提交后才释放锁
                 order_db.delete(order_lock)
             except Exception as e:
@@ -247,10 +238,10 @@ def checkout_2pc(order_id: str):
     
 
 
-def checkout_commit(order_entry: OrderValue, order_id: str, txn_id: str, log_item) -> Response:
+def checkout_commit(order_entry: OrderValue, order_id: str, txn_id: str) -> Response:
     # commit phase
     # first, log this to-be-committed transaction
-    log_commit(keys=[], args=[log_item])
+    log_commit(keys=[], args=[str((order_id, txn_id))])
 
     # try to commit it
     COMMIT_RETRIES = 10
@@ -273,13 +264,15 @@ def checkout_commit(order_entry: OrderValue, order_id: str, txn_id: str, log_ite
     # update status of this order
     order_entry.paid = True
     for _ in range(COMMIT_RETRIES):
-        try: order_db.set(order_id, msgpack.encode(order_entry))
+        try: 
+            order_db.set(order_id, msgpack.encode(order_entry))
+            break
         except: continue
         
     # if successful, remove this transaction from the log set
-    unlog_commit(keys=[], args=[log_item])
+    unlog_commit(keys=[], args=[str((order_id, txn_id))])
 
-def checkout_prepare(order_entry: OrderValue, log_item, txn_id, order_id) -> Response:
+def checkout_prepare(order_entry: OrderValue, txn_id, order_id) -> Response:
     try:
         prepare_resp = [
                 # payment prepare
@@ -294,7 +287,7 @@ def checkout_prepare(order_entry: OrderValue, log_item, txn_id, order_id) -> Res
         all_success = all(resp.status_code == 200 for resp in prepare_resp)
 
         if all_success:
-            log_commit(keys=[], args=[log_item])
+            log_commit(keys=[], args=[str((order_id, txn_id))])
             # order_entry.paid = True
             # order_db.set(order_id, msgpack.encode(order_entry))
             app.logger.info(f"[Prepare] Checkout-Prepare admitted, txn-id: {txn_id}")
@@ -312,78 +305,50 @@ def checkout_prepare(order_entry: OrderValue, log_item, txn_id, order_id) -> Res
         app.logger.error(f"Error in checkout prepare: {str(e)}")
         return Response(f"Error: Exception during checkout: {str(e)}", status=409)
 
-# TODO: each step, should do exactly the same operation as checkout_commit, maybe call checkout_commit in for loop
 def commit_commit_set():
     # finally then, try to commit all the commit set
     commit_set = order_db.smembers("uncommit_txn_set")
     # app.logger.info(f"[Scanner] Committing {commit_set}")
     app.logger.info(f"[Scanner] Committing")
     for item in commit_set:
+        (order_id, txn_id) = eval(item)
+        order_entry: OrderValue = get_order_from_db(order_id)
+        
+        commit_lock = f"lock:commit:{txn_id}"
+        acquire_lock = order_db.set(commit_lock, os.getpid(), nx=True, get=True) is None
+        if not acquire_lock:
+            continue 
         try:
-            log_item = json.loads(item.decode("utf-8"))
-            commit_lock = "lock:commit:" + log_item.get("transaction_id")
-            old_key = order_db.set(commit_lock, os.getpid(), nx=True, get=True)#, ex=30)    
-            acqiured_lock = (old_key is None)
-            try:
-                if acqiured_lock:
-                    commit_resp = [
-                        # payment commit
-                        send_post_request(f"{GATEWAY_URL}/payment/checkout_commit/" + 
-                            f"{log_item['user_id']}/{log_item['transaction_id']}/{log_item['total_cost']}")
-                    ] + [
-                        # order commit
-                        send_post_request(f"{GATEWAY_URL}/stock/checkout_commit/{item_id}/{amount}")
-                        for (item_id, amount) in log_item['items']
-                    ]
-                    app.logger.info(f"commit response: {commit_resp[0].text}") # payment commit response
-                    if all(resp.status_code == 200 for resp in commit_resp):
-                        unlog_commit(keys=[], args=[log_item])
-                        # Create an OrderValue from log_item and mark it as paid
-                        order_id = log_item['order_id']
-                        order_entry = OrderValue(
-                            paid=True,
-                            items=log_item['items'],
-                            user_id=log_item['user_id'],
-                            total_cost=log_item['total_cost']
-                        )
-                        # Try to update the order in the database
-                        for _ in range(10):
-                            try:
-                                order_db.set(order_id, msgpack.encode(order_entry))
-                                break
-                            except:
-                                continue
-            finally:
-                # TODO: has removed expiry time, old_key = order_db.set(commit_lock, os.getpid(), nx=True, get=True)#, ex=30)    
-                # so no need to check if this lock is owned by this process
-                if acqiured_lock and order_db.get(commit_lock) == os.getpid():
-                    order_db.delete(commit_lock)
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            # 记录错误并尝试清理无效数据
-            app.logger.error(f"Invalid JSON in uncommit_txn_set: {item}, Error: {str(e)}")
-
+            checkout_commit(order_entry, order_id, txn_id)
+            # only release lock when successfully commit
+            order_db.delete(f"lock:{order_id}")
+        except Exception as e:
+            app.logger.error(f"Failed to commit: {str(e)}")
+        if order_db.get(commit_lock) == os.getpid():
+            order_db.delete(commit_lock)
 
 def rollback_rollback_set():
     # finally first, try to rollback all the rollback set
     rollback_set = order_db.smembers("unrollback_txn_set")
     # app.logger.info(f"[Scanner] Rollbacking {rollback_set}")
     app.logger.info(f"[Scanner] Rollbacking")
-    for log_item_rllbck in [ json.loads(item.decode("utf-8")) for item in rollback_set ]:
-        rollback_lock = "lock:rollback:" + log_item_rllbck.get("transaction_id")
+    for (order_id, txn_id) in [ eval(item) for item in rollback_set ]:
+        order_entry: OrderValue = get_order_from_db(order_id)
+        rollback_lock = f"lock:rollback:{txn_id}"
         old_key = order_db.set(rollback_lock, os.getpid(), nx=True, get=True)#, ex=30)    
         acqiured_lock = (old_key is None)
         try:
             if acqiured_lock:
                 rollback_resp = [
                     # payment rollback
-                    send_post_request(f"{GATEWAY_URL}/payment/checkout_rollback/{log_item_rllbck['user_id']}/{log_item_rllbck['transaction_id']}")
+                    send_post_request(f"{GATEWAY_URL}/payment/checkout_rollback/{order_entry.user_id}/{txn_id}")
                 ] + [
                     # order rollback
-                    send_post_request(f"{GATEWAY_URL}/stock/checkout_rollback/{item_id}/{log_item_rllbck['transaction_id']}")
-                    for (item_id, _) in log_item_rllbck['items']
+                    send_post_request(f"{GATEWAY_URL}/stock/checkout_rollback/{item_id}/{txn_id}")
+                    for (item_id, _) in order_entry.items
                 ]
                 if all(resp.status_code == 200 for resp in rollback_resp):
-                    unlog_rollback(keys=[], args=[json.dumps(log_item_rllbck)])
+                    unlog_rollback(keys=[], args=[str((order_id, txn_id))])
         finally:
             # TODO: has removed expiry time, old_key = order_db.set(rollback_set, os.getpid(), nx=True, get=True)#, ex=30)    
             # so no need to check if this lock is owned by this process

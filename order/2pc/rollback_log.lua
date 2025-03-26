@@ -1,6 +1,6 @@
-local txn_content = ARGV[1]
+local log_item = ARGV[1]
 
-local result = redis.call("SADD", "unrollback_txn_set", txn_content)
+local result = redis.call("SADD", "unrollback_txn_set", log_item)
 
 if result == 1 then
     return "Added Successfully"
