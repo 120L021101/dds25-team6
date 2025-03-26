@@ -207,17 +207,17 @@ def checkout_2pc(order_id: str):
         # prepare phase
         resp_prepare = checkout_prepare(order_entry, txn_id, order_id)
 
-        # 根据准备结果决定是否立即提交
+        # decide whether to commit based on prepare's result
         if resp_prepare.status_code == 200:
             try:
                 checkout_commit(order_entry, order_id, txn_id)
-                # 只有在成功提交后才释放锁
+                # only release lock when commit successfully
                 order_db.delete(order_lock)
             except Exception as e:
                 app.logger.error(f"提交失败: {str(e)}")
-                # 提交失败，让recovery机制处理
+                # commit filaed, let recovery mechanism to process(retry) commit later
         else:
-            # 准备失败，释放锁让其他操作继续
+            # prepare failed, release lock to let others continue
             order_db.delete(order_lock)
 
         # Prepare success, commit immediately
@@ -293,7 +293,7 @@ def checkout_prepare(order_entry: OrderValue, txn_id, order_id) -> Response:
             app.logger.info(f"[Prepare] Checkout-Prepare admitted, txn-id: {txn_id}")
             return Response("[Prepare] Checkout-Prepare admitted. Result may be updated later in mins", status=200)
         else:
-            # 准备阶段失败，记录详细错误信息
+            # record detailed info if prepare failed
             failed_services = [
                 f"{i}:{resp.status_code}" 
                 for i, resp in enumerate(prepare_resp) 
