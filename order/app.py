@@ -27,7 +27,7 @@ sentinel = Sentinel(
     password=os.environ["REDIS_PASSWORD"],
 )
 
-# 始终从sentinel获得最新的master连接
+# always get latest master connection from sentinel
 def get_redis_connection(db_num=0):
     return sentinel.master_for(
         "order-master", 
@@ -312,7 +312,7 @@ def checkout_prepare(order_entry: OrderValue, log_item, txn_id, order_id) -> Res
         app.logger.error(f"Error in checkout prepare: {str(e)}")
         return Response(f"Error: Exception during checkout: {str(e)}", status=409)
 
-
+# TODO: each step, should do exactly the same operation as checkout_commit, maybe call checkout_commit in for loop
 def commit_commit_set():
     # finally then, try to commit all the commit set
     commit_set = order_db.smembers("uncommit_txn_set")
@@ -335,7 +335,7 @@ def commit_commit_set():
                         send_post_request(f"{GATEWAY_URL}/stock/checkout_commit/{item_id}/{amount}")
                         for (item_id, amount) in log_item['items']
                     ]
-                    app.logger.info(f"commit response: {commit_resp[0].text}")
+                    app.logger.info(f"commit response: {commit_resp[0].text}") # payment commit response
                     if all(resp.status_code == 200 for resp in commit_resp):
                         unlog_commit(keys=[], args=[log_item])
                         # Create an OrderValue from log_item and mark it as paid
@@ -354,6 +354,8 @@ def commit_commit_set():
                             except:
                                 continue
             finally:
+                # TODO: has removed expiry time, old_key = order_db.set(commit_lock, os.getpid(), nx=True, get=True)#, ex=30)    
+                # so no need to check if this lock is owned by this process
                 if acqiured_lock and order_db.get(commit_lock) == os.getpid():
                     order_db.delete(commit_lock)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
@@ -383,6 +385,8 @@ def rollback_rollback_set():
                 if all(resp.status_code == 200 for resp in rollback_resp):
                     unlog_rollback(keys=[], args=[json.dumps(log_item_rllbck)])
         finally:
+            # TODO: has removed expiry time, old_key = order_db.set(rollback_set, os.getpid(), nx=True, get=True)#, ex=30)    
+            # so no need to check if this lock is owned by this process
             if acqiured_lock and order_db.get(rollback_lock) == os.getpid():
                 order_db.delete(rollback_lock)
 

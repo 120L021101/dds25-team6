@@ -21,7 +21,7 @@ sentinel = Sentinel(
     password=os.environ["REDIS_PASSWORD"],
 )
 
-# 始终从sentinel获得最新的master连接
+# always get latest master connection from sentinel
 def get_redis_connection():
     return sentinel.master_for("payment-master", password=os.environ["REDIS_PASSWORD"], decode_responses=False)
 

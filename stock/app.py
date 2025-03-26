@@ -19,7 +19,7 @@ sentinel = Sentinel(
     password=os.environ["REDIS_PASSWORD"],
 )
 
-# 始终从sentinel获得最新的master连接
+# always get latest master connection from sentinel
 def get_redis_connection():
     return sentinel.master_for("stock-master", password=os.environ["REDIS_PASSWORD"], decode_responses=False)
 
@@ -124,7 +124,7 @@ with open(file='2pc/prepare.lua', mode='r') as f:
 @app.post('/checkout_prepare/<item_id>/<transaction_id>/<amount>')
 def checkout_prepare(item_id, transaction_id, amount: str):
     amount = int(amount)
-    # 1. check item availability
+    # 1. check item availability, TODO: check if is None
     app.logger.info(f"[Stock]: PREPARE: {transaction_id}, {item_id}, {amount}")
     stock_enrty = get_item_from_db(item_id=item_id)
     # 2. check if sold out
@@ -143,9 +143,11 @@ def checkout_prepare(item_id, transaction_id, amount: str):
             app.logger.info(f"[Stock]: Prepared: {item_id}, {result}")
             return Response(result, status=200)
         elif "insufficient" in result:
+            # TODO: duplicate operation to "2. check if sold out"?, i suggest deleting "2. check if sold out"
             app.logger.error(f"[Stock<Error>]: Insufficient stock: {item_id}, {result}")
             return Response(result, status=400)  
         else:
+            # should never enter this branch, can't prepare committed transaction etc.
             app.logger.error(f"[Stock<Error>]: Conflict: {item_id}, [prepare.lua]-{result}")
             return Response(result, status=409)  # Conflict
     except Exception as e:
@@ -181,6 +183,7 @@ def checkout_rollback(item_id, transaction_id):
             return Response(result, status=200)
         else:
             # No lock or not belonging to txn
+            # therefore nothing to rollback, still reply success to client
             return Response(result, status=200)
     except Exception as e:
         app.logger.error(f"Error in checkout rollback: {str(e)}")
@@ -212,6 +215,7 @@ def checkout_commit(item_id, transaction_id, amount: str):
         if "COMMITTED" in result:
             app.logger.info(f'[Stock Commit] Stock committed: {transaction_id}')
             return Response(result, status=200)
+        # TODO: invalid branch, no such "Fatal Error" in return values
         elif "Fatal Error" in result:
             app.logger.info(f'[Stock Commit] Fatal error: {transaction_id}')
             return Response(result, status=404)  

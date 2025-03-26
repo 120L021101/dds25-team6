@@ -21,7 +21,7 @@ if txn_status == "COMMITTED" then
     return "Cannot rollback COMMITTED transaction"
 end
 
--- Strange state
+-- Strange state, e.g. insufficient money during prepare phase, thus never record this transaction
 if txn_status ~= "PREPARED" then
     return "Transaction not in PREPARED state, nothing to rollback"
 end
