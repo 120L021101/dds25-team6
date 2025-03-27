@@ -136,7 +136,7 @@ def checkout_prepare(user_id, transaction_id, amount: str):
     if user_entry.credit < int(amount):
         """ cannot prepare """
         app.logger.error(f"Insufficient Money")
-        return Response(f"Insufficient Money", status=500)
+        return Response(f"Insufficient Money", status=400)
 
     ret : bytes = checkout_prepare_script(keys=[user_id,], args=[transaction_id,])
     if ret.decode('utf-8') == 'Failed, Already Locked':
@@ -219,12 +219,16 @@ def checkout_rollback(user_id, transaction_id):
     # lookup the current transaction status
     status: bytes | None = db.get("txn:"+transaction_id)
     
-    if status is not None:
-        status = status.decode("utf-8")
-        if status.startswith("ROLLBACKED"):
-            return Response(f"[Payment] Rollback {transaction_id} Successfully", status=200)
-        elif status.startswith("COMMITTED"):
-            return Response(f"[Payment] Cannot Rollback a committed transaction", status=409)
+    if status is None:
+        # e.g. insufficient money causes prepare failed, the coordinator will rollback it, but we dont record it
+        return Response(f"[Payment Success] Rollback {transaction_id} Successfully", status=200)
+    
+    status = status.decode('utf-8')
+    if status.startswith("ROLLBACKED"):
+        # if it has been rollbacked, then dont rollback it again
+        return Response(f"[Payment] Rollback {transaction_id} Successfully", status=200)
+    elif status.startswith("COMMITTED"):
+        return Response(f"[Payment] Cannot Rollback a committed transaction", status=409)
 
     ret = checkout_rollback_script(keys=[user_id], args=[transaction_id])
     if ret.decode('utf-8') == 'ROLLBACKED':
