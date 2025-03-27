@@ -299,12 +299,9 @@ def checkout_commit(order_entry: OrderValue, order_id: str, txn_id: str) -> Resp
     unlog_commit(keys=[], args=[str((order_id, txn_id))])
 
 def commit_commit_set():
-    # finally then, try to commit all the commit set
     commit_set = order_db.smembers("uncommit_txn_set")
-    # app.logger.info(f"[Scanner] Committing {commit_set}")
     app.logger.info(f"[Scanner] Committing")
-    for item in commit_set:
-        (order_id, txn_id) = eval(item)
+    for (order_id, txn_id) in [ eval(item) for item in commit_set ]:
         order_db.set(f"{txn_id}:STATUS", "COMMIT_LOCK")
         order_entry: OrderValue = get_order_from_db(order_id)
         
@@ -323,9 +320,7 @@ def commit_commit_set():
             order_db.delete(commit_lock)
 
 def rollback_rollback_set():
-    # finally first, try to rollback all the rollback set
     rollback_set = order_db.smembers("unrollback_txn_set")
-    # app.logger.info(f"[Scanner] Rollbacking {rollback_set}")
     app.logger.info(f"[Scanner] Rollbacking")
     for (order_id, txn_id) in [ eval(item) for item in rollback_set ]:
         if "LOCK" in order_db.get(f"{txn_id}:STATUS").decode("utf-8"):

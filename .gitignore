@@ -5,3 +5,4 @@ test/__pycache__
 nginx.conf
 test_script
 common_use
+.vscode
