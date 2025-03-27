@@ -126,12 +126,12 @@ def checkout_prepare(item_id, transaction_id, amount: str):
     amount = int(amount)
     # 1. check item availability, TODO: check if is None
     app.logger.info(f"[Stock]: PREPARE: {transaction_id}, {item_id}, {amount}")
-    stock_enrty = get_item_from_db(item_id=item_id)
-    # 2. check if sold out
-    app.logger.info(f"Item information: amount:{stock_enrty.stock}, price:{stock_enrty.price}, sold_out:{stock_enrty.stock < amount}")
-    if int(stock_enrty.stock) < amount:
-        app.logger.info(f"Item: {item_id} has been sold out!")
-        abort(400, f"Item: {item_id} has been sold out!")
+    # stock_enrty = get_item_from_db(item_id=item_id)
+    # # 2. check if sold out
+    # app.logger.info(f"Item information: amount:{stock_enrty.stock}, price:{stock_enrty.price}, sold_out:{stock_enrty.stock < amount}")
+    # if int(stock_enrty.stock) < amount:
+    #     app.logger.info(f"Item: {item_id} has been sold out!")
+    #     abort(400, f"Item: {item_id} has been sold out!")
     # lock stock version
     # 3. lua: check + lock
     try:

@@ -202,6 +202,7 @@ def checkout_2pc(order_id: str):
 
         txn_id = get_uuid()
         # Add to rollback set
+        order_db.set(f"{txn_id}:STATUS", "ROLLBACK_LOCK")
         log_rollback(keys=[], args=[str((order_id, txn_id))])
 
         # prepare phase
@@ -217,22 +218,51 @@ def checkout_2pc(order_id: str):
                 app.logger.error(f"Failed to commit: {str(e)}")
                 # commit filaed, let recovery mechanism to process(retry) commit later
         else:
+            order_db.set(f"{txn_id}:STATUS", "ROLLBACK_READY")
             # prepare failed, release lock to let others continue
             order_db.delete(order_lock)
-        
-        # TODO: should delete these when the set conflicts or other potential issues are solved, 
-        # ctrl+F "TODO: commit commit set" to locate detailed info
-        # scan commit sets, help commit
-        commit_commit_set()
-        # scan rollback sets, help rollback
-        rollback_rollback_set()
 
         return resp_prepare
     finally:
         if acqiured_lock and order_db.get(order_lock) == os.getpid():
             order_db.delete(order_lock)
-    
+        # TODO: no return value if an exception occurs?
 
+def checkout_prepare(order_entry: OrderValue, txn_id, order_id) -> Response:
+    try:
+        prepare_req_urls = [
+            # payment prepare
+            f"{GATEWAY_URL}/payment/checkout_prepare/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}",
+        ] + [
+            # stock prepare
+            f"{GATEWAY_URL}/stock/checkout_prepare/{item_id}/{txn_id}/{amount}"
+                for (item_id, amount) in order_entry.items
+        ]
+        prepare_resp = []
+        for req_url in prepare_req_urls:
+            resp = send_post_request(req_url)
+            prepare_resp.append(resp)
+            if resp.status_code != 200:
+                break # IMPOARTANT: early stop, i think for now its pretty pretty important to reduce conflict
+
+        if all(resp.status_code == 200 for resp in prepare_resp):
+            log_commit(keys=[], args=[str((order_id, txn_id))])
+            # order_entry.paid = True
+            # order_db.set(order_id, msgpack.encode(order_entry))
+            app.logger.info(f"[Prepare] Checkout-Prepare admitted, txn-id: {txn_id}")
+            return Response("[Prepare] Checkout-Prepare admitted. Result may be updated later in mins", status=200)
+        else:
+            # record detailed info if prepare failed
+            failed_services = [
+                f"{i}:{resp.status_code}" 
+                for i, resp in enumerate(prepare_resp) 
+                if resp.status_code != 200
+            ]
+            app.logger.error(f"[Prepare <Error>] Failed services: {','.join(failed_services)}, txn-id: {txn_id}")
+            return Response("Error: Checkout failed, try again later", status=409)
+    except Exception as e:
+        app.logger.error(f"Error in checkout prepare: {str(e)}")
+        return Response(f"Error: Exception during checkout: {str(e)}", status=409)
 
 def checkout_commit(order_entry: OrderValue, order_id: str, txn_id: str) -> Response:
     # commit phase
@@ -268,36 +298,6 @@ def checkout_commit(order_entry: OrderValue, order_id: str, txn_id: str) -> Resp
     # if successful, remove this transaction from the log set
     unlog_commit(keys=[], args=[str((order_id, txn_id))])
 
-def checkout_prepare(order_entry: OrderValue, txn_id, order_id) -> Response:
-    try:
-        prepare_resp = [
-                # payment prepare
-                send_post_request(f"{GATEWAY_URL}/payment/checkout_prepare/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}")
-            ] + [
-                # stock prepare
-                send_post_request(f"{GATEWAY_URL}/stock/checkout_prepare/{item_id}/{txn_id}/{amount}") 
-                for (item_id, amount) in order_entry.items
-            ]
-        
-        if all(resp.status_code == 200 for resp in prepare_resp):
-            log_commit(keys=[], args=[str((order_id, txn_id))])
-            # order_entry.paid = True
-            # order_db.set(order_id, msgpack.encode(order_entry))
-            app.logger.info(f"[Prepare] Checkout-Prepare admitted, txn-id: {txn_id}")
-            return Response("[Prepare] Checkout-Prepare admitted. Result may be updated later in mins", status=200)
-        else:
-            # record detailed info if prepare failed
-            failed_services = [
-                f"{i}:{resp.status_code}" 
-                for i, resp in enumerate(prepare_resp) 
-                if resp.status_code != 200
-            ]
-            app.logger.error(f"[Prepare <Error>] Failed services: {','.join(failed_services)}, txn-id: {txn_id}")
-            return Response("Error: Checkout failed, try again later", status=409)
-    except Exception as e:
-        app.logger.error(f"Error in checkout prepare: {str(e)}")
-        return Response(f"Error: Exception during checkout: {str(e)}", status=409)
-
 def commit_commit_set():
     # finally then, try to commit all the commit set
     commit_set = order_db.smembers("uncommit_txn_set")
@@ -305,6 +305,7 @@ def commit_commit_set():
     app.logger.info(f"[Scanner] Committing")
     for item in commit_set:
         (order_id, txn_id) = eval(item)
+        order_db.set(f"{txn_id}:STATUS", "COMMIT_LOCK")
         order_entry: OrderValue = get_order_from_db(order_id)
         
         commit_lock = f"lock:commit:{txn_id}"
@@ -313,6 +314,7 @@ def commit_commit_set():
             continue 
         try:
             checkout_commit(order_entry, order_id, txn_id)
+            order_db.set(f"{txn_id}:STATUS", "COMMITTED")
             # only release lock when successfully commit
             order_db.delete(f"lock:{order_id}")
         except Exception as e:
@@ -326,6 +328,9 @@ def rollback_rollback_set():
     # app.logger.info(f"[Scanner] Rollbacking {rollback_set}")
     app.logger.info(f"[Scanner] Rollbacking")
     for (order_id, txn_id) in [ eval(item) for item in rollback_set ]:
+        if "LOCK" in order_db.get(f"{txn_id}:STATUS").decode("utf-8"):
+            continue
+
         order_entry: OrderValue = get_order_from_db(order_id)
         rollback_lock = f"lock:rollback:{txn_id}"
         old_key = order_db.set(rollback_lock, os.getpid(), nx=True, get=True)#, ex=30)    
@@ -341,6 +346,7 @@ def rollback_rollback_set():
                     for (item_id, _) in order_entry.items
                 ]
                 if all(resp.status_code == 200 for resp in rollback_resp):
+                    order_db.set(f"{txn_id}:STATUS", "ROLLBACKED")
                     unlog_rollback(keys=[], args=[str((order_id, txn_id))])
         finally:
             # TODO: has removed expiry time, old_key = order_db.set(rollback_set, os.getpid(), nx=True, get=True)#, ex=30)    
@@ -358,10 +364,8 @@ import threading
 # Start the background thread when the app starts
 background_thread = threading.Thread(target=background_commit_and_rollback)
 background_thread.daemon = True  # This ensures it runs in the background and terminates with the main program
-# TODO: commit commit set and rollback rollback set should be done in a background process,
-#       but for now, some conflict occur due to concurrent visiting set
-#       when thats solved, should uncomment the below line of code
-# background_thread.start()
+# commit commit set and rollback rollback set should be done in a background process,
+background_thread.start()
 
 def get_uuid() -> str:
     txn_id = str(uuid.uuid4())
