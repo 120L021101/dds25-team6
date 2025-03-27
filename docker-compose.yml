@@ -16,14 +16,17 @@ services:
     ports:
       - "8000:80"
     depends_on:
-      - order-service
-      - stock-service
-      - payment-service
+      - order-service-1
+      - order-service-2
+      - stock-service-1
+      - stock-service-2
+      - payment-service-1
+      - payment-service-2
     networks:
       my_network:
         ipv4_address: 192.168.1.10
 
-  order-service:
+  order-service-1:
     build: ./order
     image: order:latest
     environment:
@@ -42,6 +45,20 @@ services:
     networks:
       my_network:
         ipv4_address: 192.168.1.20
+
+  order-service-2:
+    build: ./order
+    image: order:latest
+    environment:
+      - GATEWAY_URL=http://gateway:80
+    command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
+    env_file:
+      - env/order_redis.env
+    depends_on:
+      - order-db-sentinel
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.21
 
   order-db-master:
     image: redis:7.2-bookworm
@@ -115,7 +132,7 @@ services:
       my_network:
         ipv4_address: 192.168.1.50
 
-  stock-service:
+  stock-service-1:
     build: ./stock
     image: stock:latest
     command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
@@ -129,6 +146,18 @@ services:
     networks:
       my_network:
         ipv4_address: 192.168.1.60
+
+  stock-service-2:
+    build: ./stock
+    image: stock:latest
+    command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
+    env_file:
+      - env/stock_redis.env
+    depends_on:
+      - stock-db-sentinel
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.61
 
   stock-db-master:
     image: redis:7.2-bookworm
@@ -198,7 +227,7 @@ services:
       my_network:
         ipv4_address: 192.168.1.90
 
-  payment-service:
+  payment-service-1:
     build: ./payment
     image: payment:latest
     command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
@@ -215,6 +244,18 @@ services:
     networks:
       my_network:
         ipv4_address: 192.168.1.100
+
+  payment-service-2:
+    build: ./payment
+    image: payment:latest
+    command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
+    env_file:
+      - env/payment_redis.env
+    depends_on:
+      - payment-db-sentinel
+    networks:
+      my_network:
+        ipv4_address: 192.168.1.101
 
   payment-db-master:
     image: redis:7.2-bookworm
