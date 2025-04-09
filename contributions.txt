@@ -1,0 +1,3 @@
+Zuji Zhou: Set up the configuration and 2PC framework, implemented most of the code, ran experiments, optimized the implementations, and wrote the documentation.
+Haoran Tang: Implemented the stock microservice, ran experiments, and wrote the case analysis and documentation.
+Yifan Sun: Wrote the documentation and finalized the delivery.
