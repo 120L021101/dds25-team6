@@ -223,10 +223,11 @@ def checkout_2pc(order_id: str):
             order_db.delete(order_lock)
 
         return resp_prepare
+    except:
+        abort(500, "internal error")
     finally:
         if acqiured_lock and order_db.get(order_lock) == os.getpid():
             order_db.delete(order_lock)
-        # TODO: no return value if an exception occurs?
 
 def checkout_prepare(order_entry: OrderValue, txn_id, order_id) -> Response:
     try:

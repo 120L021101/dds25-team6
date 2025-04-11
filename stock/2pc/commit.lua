@@ -15,7 +15,7 @@ if redis.call("EXISTS", freeze_key) == 0 then
     return "Failed, Freeze data not found"
 end
 
--- 检查item_key是否存在
+-- check if item_key exists
 if redis.call("EXISTS", item_key) == 0 then
     return "Failed, Item not found"
 end
