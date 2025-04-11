@@ -1,53 +1,9 @@
-# Web-scale Data Management Project Template
+# Distributed Data Systems Project
 
-Basic project structure with Python's Flask and Redis. 
-**You are free to use any web framework in any language and any database you like for this project.**
+Built on the Two-Phase Commit (2PC) protocol, our system coordinates multiple service instances and Redis cluster to achieve consistency, low-latency responses, and robust fault tolerance. The core transaction logic is implemented using Redis Lua scripts, enabling atomic operations across distributed components.
 
-### Project structure
+1. **Order Service** acts as the coordinator of our distributed transaction framework. It follows the 2PC protocol (Prepare \- Commit \- Rollback) to ensure consistency across services. We first perform the operation most prone to failure(which should be stock in this case), and stop early when a failure occurs to reduce the chance of rollbacks. If the initial step succeeds, we proceed with subsequent operations. Unprocessed or incomplete transactions are stored in a Redis set, and a background thread periodically scans and attempts to recover or complete them.
 
-* `env`
-    Folder containing the Redis env variables for the docker-compose deployment
-    
-* `helm-config` 
-   Helm chart values for Redis and ingress-nginx
-        
-* `k8s`
-    Folder containing the kubernetes deployments, apps and services for the ingress, order, payment and stock services.
-    
-* `order`
-    Folder containing the order application logic and dockerfile. 
-    
-* `payment`
-    Folder containing the payment application logic and dockerfile. 
+2. **Payment Service** participates in the 2PC protocol to ensure its operations align with the overall transaction consistency. It responds to prepare, commit, or rollback instructions from the Order Service. Because it’s relatively unlikely to visit an account quite simultaneously, in other word, conflicts occur on the payment side not very often, therefore, we directly lock the account during processing the checkout of an order.
 
-* `stock`
-    Folder containing the stock application logic and dockerfile. 
-
-* `test`
-    Folder containing some basic correctness tests for the entire system. (Feel free to enhance them)
-
-### Deployment types:
-
-#### docker-compose (local development)
-
-After coding the REST endpoint logic run `docker-compose up --build` in the base folder to test if your logic is correct
-(you can use the provided tests in the `\test` folder and change them as you wish). 
-
-***Requirements:*** You need to have docker and docker-compose installed on your machine. 
-
-K8s is also possible, but we do not require it as part of your submission. 
-
-#### minikube (local k8s cluster)
-
-This setup is for local k8s testing to see if your k8s config works before deploying to the cloud. 
-First deploy your database using helm by running the `deploy-charts-minicube.sh` file (in this example the DB is Redis 
-but you can find any database you want in https://artifacthub.io/ and adapt the script). Then adapt the k8s configuration files in the
-`\k8s` folder to mach your system and then run `kubectl apply -f .` in the k8s folder. 
-
-***Requirements:*** You need to have minikube (with ingress enabled) and helm installed on your machine.
-
-#### kubernetes cluster (managed k8s cluster in the cloud)
-
-Similarly to the `minikube` deployment but run the `deploy-charts-cluster.sh` in the helm step to also install an ingress to the cluster. 
-
-***Requirements:*** You need to have access to kubectl of a k8s cluster.
+3. **Stock Service** uses the TCC (Try \- Confirm \- Cancel) transaction model by temporarily freezing stock to isolate and manage inventory operations with stronger consistency guarantees. To support high concurrency, we avoid strict 2PC here due to its prolonged lock holding, which led to a high failure rate under load. TCC enables more granular control over resource locking and reduces contention during peak usage.
