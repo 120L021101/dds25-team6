@@ -230,7 +230,6 @@ services:
     build: ./payment
     image: payment:latest
     command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
-    # command: sh -c "pip install debugpy && python -m debugpy --listen 0.0.0.0:5678 --wait-for-client -m gunicorn -b 0.0.0.0:5000 -w 1 -k gevent --worker-connections 1000 --timeout 300 app:app"
     env_file:
       - env/payment_redis.env
     ports:
@@ -247,7 +246,7 @@ services:
   payment-service-2:
     build: ./payment
     image: payment:latest
-    command: gunicorn -b 0.0.0.0:5000 -w 4 -k gevent --worker-connections 1000 --timeout 15 --log-level=info app:app
+    command: python payment_server.py
     env_file:
       - env/payment_redis.env
     depends_on:

@@ -13,6 +13,8 @@ from flask import Flask, jsonify, abort, Response
 from redis.sentinel import Sentinel 
 import time
 import json
+import grpc
+import payment_pb2_grpc, payment_pb2
 
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
@@ -26,6 +28,9 @@ sentinel = Sentinel(
     socket_timeout=5,
     password=os.environ["REDIS_PASSWORD"],
 )
+
+payment_2pc_channel = grpc.insecure_channel(f"gateway:50051")
+payment_2pc_stub = payment_pb2_grpc.PaymentServiceStub(payment_2pc_channel)
 
 # always get latest master connection from sentinel
 def get_redis_connection(db_num=0):
@@ -230,23 +235,31 @@ def checkout_2pc(order_id: str):
             order_db.delete(order_lock)
 
 def checkout_prepare(order_entry: OrderValue, txn_id, order_id) -> Response:
+    # grpc
     try:
+        # payment prepare
+        response = payment_2pc_stub.CheckoutPrepare(payment_pb2.TxnRequest(
+            user_id=order_entry.user_id,
+            transaction_id=txn_id,
+            amount=order_entry.total_cost
+        ))
+        app.logger.info(f"{response}")
+
         prepare_req_urls = [
-            # payment prepare
-            f"{GATEWAY_URL}/payment/checkout_prepare/{order_entry.user_id}/{txn_id}/{order_entry.total_cost}",
-        ] + [
             # stock prepare
             f"{GATEWAY_URL}/stock/checkout_prepare/{item_id}/{txn_id}/{amount}"
                 for (item_id, amount) in order_entry.items
         ]
         prepare_resp = []
         for req_url in prepare_req_urls:
+            if response.code != 200:
+                break
             resp = send_post_request(req_url)
             prepare_resp.append(resp)
             if resp.status_code != 200:
                 break # IMPOARTANT: early stop, i think for now its pretty pretty important to reduce conflict
 
-        if all(resp.status_code == 200 for resp in prepare_resp):
+        if response.code == 200 and all(resp.status_code == 200 for resp in prepare_resp):
             log_commit(keys=[], args=[str((order_id, txn_id))])
             # order_entry.paid = True
             # order_db.set(order_id, msgpack.encode(order_entry))
@@ -254,7 +267,7 @@ def checkout_prepare(order_entry: OrderValue, txn_id, order_id) -> Response:
             return Response("[Prepare] Checkout-Prepare admitted. Result may be updated later in mins", status=200)
         else:
             # record detailed info if prepare failed
-            failed_services = [
+            failed_services = ([-1] if response.code == 200 else []) + [
                 f"{i}:{resp.status_code}" 
                 for i, resp in enumerate(prepare_resp) 
                 if resp.status_code != 200
@@ -262,8 +275,8 @@ def checkout_prepare(order_entry: OrderValue, txn_id, order_id) -> Response:
             app.logger.error(f"[Prepare <Error>] Failed services: {','.join(failed_services)}, txn-id: {txn_id}")
             return Response("Error: Checkout failed, try again later", status=409)
     except Exception as e:
-        app.logger.error(f"Error in checkout prepare: {str(e)}")
         return Response(f"Error: Exception during checkout: {str(e)}", status=409)
+
 
 def checkout_commit(order_entry: OrderValue, order_id: str, txn_id: str) -> Response:
     # commit phase
@@ -301,7 +314,7 @@ def checkout_commit(order_entry: OrderValue, order_id: str, txn_id: str) -> Resp
 
 def commit_commit_set():
     commit_set = order_db.smembers("uncommit_txn_set")
-    app.logger.info(f"[Scanner] Committing")
+    # app.logger.info(f"[Scanner] Committing")
     for (order_id, txn_id) in [ eval(item) for item in commit_set ]:
         order_db.set(f"{txn_id}:STATUS", "COMMIT_LOCK")
         order_entry: OrderValue = get_order_from_db(order_id)
@@ -322,7 +335,7 @@ def commit_commit_set():
 
 def rollback_rollback_set():
     rollback_set = order_db.smembers("unrollback_txn_set")
-    app.logger.info(f"[Scanner] Rollbacking")
+    # app.logger.info(f"[Scanner] Rollbacking")
     for (order_id, txn_id) in [ eval(item) for item in rollback_set ]:
         if "LOCK" in order_db.get(f"{txn_id}:STATUS").decode("utf-8"):
             continue
